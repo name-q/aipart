@@ -25,8 +25,15 @@ test('更换工具后复用本地草案，确认后跨工具读取同一规则',
     spawnSync(process.execPath, [cli, 'init'], { cwd }).status,
     0,
   );
+  const removed = spawnSync(
+    process.execPath,
+    [cli, 'init', '--ai', 'codex', '--offline'],
+    { cwd, encoding: 'utf8' },
+  );
+  assert.equal(removed.status, 1);
+  assert.match(removed.stderr, /openai \/ claude \/ deepseek/);
   assert.deepEqual(fs.readdirSync(cwd), []);
-  call('init', '--ai', 'codex', '--offline');
+  call('init', '--ai', 'openai', '--offline');
   fs.writeFileSync(
     path.join(cwd, 'claude'),
     '#!/usr/bin/env node\nif(process.argv[2]!=="--version")console.log(process.argv.at(-1));\n',
@@ -51,7 +58,7 @@ test('更换工具后复用本地草案，确认后跨工具读取同一规则',
   );
   call('accept', id, '--yes');
   const state = JSON.parse(call('check', '--json'));
-  assert.equal(state.defaultAI, 'codex');
+  assert.equal(state.defaultAI, 'openai');
   assert.equal(state.ai, 'claude');
   assert.match(
     fs.readFileSync(path.join(cwd, 'AGENTS.md'), 'utf8'),
@@ -100,7 +107,7 @@ test('原生会话按项目启动并限定业务目录，离线验证草案的�
     },
   };
   fs.writeFileSync(
-    path.join(bin, 'codex'),
+    path.join(bin, 'claude'),
     [
       '#!/usr/bin/env node',
       'if(process.argv[2]==="--version")process.exit(0);',
@@ -122,9 +129,10 @@ test('原生会话按项目启动并限定业务目录，离线验证草案的�
       env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH },
     });
     assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stderr, /SQLite is an experimental feature/);
     return r.stdout;
   }
-  run('init', '--ai', 'codex', '--offline');
+  run('init', '--ai', 'claude', '--offline');
   run(
     'ask',
     '--scope',
@@ -139,83 +147,6 @@ test('原生会话按项目启动并限定业务目录，离线验证草案的�
   assert.equal(rule.scope, 'apps/site');
   run('disable', rule.id, 'code');
   assert.match(fs.readFileSync(path.join(cwd, file), 'utf8'), /rules:\{\}/);
-});
-
-test('Codex 默认模型被拒绝后使用账号目录中的可选模型', (t) => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'aipart-codex-'));
-  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
-  const code = [
-    '#!/usr/bin/env node',
-    'const argv=process.argv.slice(2);',
-    'const write=(event)=>console.log(JSON.stringify(event));',
-    'if(argv[0]==="--version")return;',
-    'if(argv[0]==="debug"){write({models:[{slug:"hidden",visibility:"hide"},{slug:"available",visibility:"list",display_name:"Available"}]});return;}',
-    'if(argv[0]!=="exec")process.exit(3);',
-    'if(argv[argv.indexOf("--model")+1]!=="available"){write({type:"turn.failed",error:{message:"model_not_found"}});process.exitCode=1;return;}',
-    'write({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({summary:"测试项目",findings:[],recommend:["guide"]})}});',
-  ].join('\n');
-  fs.writeFileSync(path.join(cwd, 'codex'), code, { mode: 0o755 });
-  const run = spawnSync(
-    process.execPath,
-    [cli, 'init', '--ai', 'codex', '--yes'],
-    {
-      cwd,
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        PATH: cwd + path.delimiter + process.env.PATH,
-        AIPART_HOME: path.join(cwd, 'private'),
-      },
-    },
-  );
-  assert.equal(run.status, 0, run.stderr);
-  assert.match(run.stdout, /Codex \/ available/);
-  assert.ok(fs.existsSync(path.join(cwd, '.aipart.sqlite')));
-  const localDir = fs.readdirSync(path.join(cwd, 'private/projects'))[0];
-  assert.equal(
-    fs.readFileSync(
-      path.join(cwd, 'private/projects', localDir, 'model-codex.txt'),
-      'utf8',
-    ),
-    'available',
-  );
-});
-
-test('Codex 返回完成事件后可以初始化，客户端进程无需先退出', (t) => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'aipart-codex-settled-'));
-  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
-  fs.writeFileSync(
-    path.join(cwd, 'codex'),
-    [
-      '#!/usr/bin/env node',
-      'if(process.argv[2]==="--version")return;',
-      'const write=o=>process.stdout.write(JSON.stringify(o)+"\\n");',
-      'write({type:"turn.started"});',
-      'write({type:"item.completed",item:{type:"agent_message",text:"正在检查"}});',
-      'write({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({summary:"扫描完成",findings:[],recommend:["guide"]})}});',
-      'write({type:"turn.completed"});',
-      'setInterval(()=>{},1000);',
-    ].join('\n'),
-    { mode: 0o755 },
-  );
-  const result = spawnSync(
-    process.execPath,
-    [cli, 'init', '--ai', 'codex', '--model', 'test', '--yes'],
-    {
-      cwd,
-      encoding: 'utf8',
-      timeout: 8000,
-      env: {
-        ...process.env,
-        PATH: cwd + path.delimiter + process.env.PATH,
-        AIPART_HOME: path.join(cwd, 'private'),
-      },
-    },
-  );
-  assert.equal(result.status, 0, result.error?.message ?? result.stderr);
-  assert.match(result.stdout, /Codex \/ test/);
-  assert.doesNotMatch(result.stderr, /SQLite is an experimental feature/);
-  assert.ok(fs.existsSync(path.join(cwd, '.aipart.sqlite')));
 });
 
 test('模型用按阶段分组的对象回复时保留非空的建议', (t) => {

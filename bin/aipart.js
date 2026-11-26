@@ -50,7 +50,6 @@ import {
 import { signInWithChatGPT } from '../lib/chatgpt-auth.js';
 const toolNames = {
   openai: 'OpenAI',
-  codex: 'Codex',
   claude: 'Claude Code',
   deepseek: 'DeepSeek',
 };
@@ -116,7 +115,7 @@ async function main() {
   if (values.version) return console.log('0.1.0');
   if (!cmd || values.help)
     return console.log(
-      'aipart init --ai <openai|codex|claude|deepseek> [--upgrade] [--model 模型] [--offline] [--yes]\naipart check [--json]\naipart ask [需求] [--scope 路径] [--stages guide,code,commit,ci] [--resume 编号]\naipart ai use <工具> [--team]\naipart accept <草案编号>\naipart enable|disable <规则编号> [阶段]\naipart hooks install\naipart lint <commit|ci>\naipart recover',
+      'aipart init --ai <openai|claude|deepseek> [--upgrade] [--model 模型] [--offline] [--yes]\naipart check [--json]\naipart ask [需求] [--scope 路径] [--stages guide,code,commit,ci] [--resume 编号]\naipart ai use <工具> [--team]\naipart accept <草案编号>\naipart enable|disable <规则编号> [阶段]\naipart hooks install\naipart lint <commit|ci>\naipart recover',
     );
   const root = findRoot(process.cwd());
   if (cmd === 'hooks' && args[0] === 'install') {
@@ -136,14 +135,14 @@ async function main() {
     (includeOverride ? values.model : undefined) ??
     read(root, modelFile(ai)) ??
     undefined;
-  const login = async (ai, device = false) => {
+  const login = async (ai) => {
     try {
       if (isApiClient(ai)) {
         const key = await secret(
           '输入 ' + toolNames[ai] + ' API Key（仅用于本次运行）',
         );
         useApiKey(ai, key);
-      } else signIn(root, ai, device);
+      } else signIn(root, ai);
     } catch (error) {
       if (error.name === 'ExitPromptError' || error.name === 'AbortPromptError')
         throw error;
@@ -289,17 +288,10 @@ async function main() {
           ...(error.code === 'SCAN_TIMEOUT'
             ? []
             : [choice('switch', '换一个工具继续')]),
-          ...(ai === 'codex'
-            ? [
-                choice('login', '在浏览器登录 ChatGPT', '登录完成后会重新连接'),
-                choice('device', '使用设备码登录', '适用于远程终端'),
-              ]
-            : [
-                choice(
-                  'login',
-                  isApiClient(ai) ? '输入 API Key' : '登录 Claude Code',
-                ),
-              ]),
+          choice(
+            'login',
+            isApiClient(ai) ? '输入 API Key' : '登录 Claude Code',
+          ),
           choice('retry', '重试连接'),
           choice('offline', '仅用本地检查'),
           choice('cancel', '取消'),
@@ -334,8 +326,8 @@ async function main() {
           const next = await chooseModel(ai, model);
           if (next.model) model = next.model;
         }
-        if (action === 'login' || action === 'device') {
-          await login(ai, action === 'device');
+        if (action === 'login') {
+          await login(ai);
           const next = await chooseModel(ai, model);
           if (next.model) model = next.model;
         }

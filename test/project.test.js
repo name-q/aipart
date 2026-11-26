@@ -32,7 +32,7 @@ test('重复初始化保留人工说明，受管内容冲突时停止', (t) => {
 
 test('关闭代码检查时保留其他编辑和确认摘要', (t) => {
   const root = fixture(t);
-  apply(root, init(root, 'codex'));
+  apply(root, init(root, 'openai'));
   fs.writeFileSync(path.join(root, '.eslintrc.json'), '{"rules":{}}');
   const rule = makeRule(root, {
     scope: '.',
@@ -109,8 +109,8 @@ test('迁移旧规则和草案到单库与个人目录，保留手工指引', as
     json({
       format: 1,
       template: 2,
-      defaultAI: 'codex',
-      agents: ['codex'],
+      defaultAI: 'openai',
+      agents: ['openai'],
       body: oldBody,
     }),
   );
@@ -129,7 +129,7 @@ test('迁移旧规则和草案到单库与个人目录，保留手工指引', as
     '.aipart.sqlite',
     'AGENTS.md',
   ]);
-  assert.equal(project(root).defaultAI, 'codex');
+  assert.equal(project(root).defaultAI, 'openai');
   assert.equal(rules(root)[0].enabled, false);
   assert.ok(read(root, '@local/drafts/' + draft + '.session.json'));
   assert.match(read(root, 'AGENTS.md'), /^团队说明/);
@@ -138,7 +138,7 @@ test('迁移旧规则和草案到单库与个人目录，保留手工指引', as
 test('旧工具停用后可重新选择提供方，已有项目规则继续生效', async (t) => {
   const root = fixture(t);
   const { project, manifest } = await import('../lib/project.js');
-  apply(root, init(root, 'codex'));
+  apply(root, init(root, 'openai'));
   const old = project(root);
   apply(root, [
     change(
@@ -146,12 +146,12 @@ test('旧工具停用后可重新选择提供方，已有项目规则继续生�
       manifest,
       json({
         ...old,
-        defaultAI: 'retired-client',
-        initialAI: 'retired-client',
-        agents: ['retired-client'],
+        defaultAI: 'codex',
+        initialAI: 'codex',
+        agents: ['codex'],
       }),
     ),
-    change(root, '@local/settings.json', json({ ai: 'retired-client' })),
+    change(root, '@local/settings.json', json({ ai: 'codex' })),
   ]);
   assert.equal(snapshot(root).ai, null);
   apply(root, init(root, 'openai'));
