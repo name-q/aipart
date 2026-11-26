@@ -94,7 +94,7 @@ test('下次启动复用登录及原服务地址，限权保留记录，401 清�
     ],
     options,
   );
-  const file = path.join(cwd, '.aipart.sqlite');
+  const file = path.join(cwd, '.aipart');
   const count = () =>
     withDatabase(
       file,

@@ -15,14 +15,7 @@ import {
   ruleDetails,
 } from '../lib/ui.js';
 import { apply, change, json, read, recover } from '../lib/files.js';
-import {
-  agents,
-  findRoot,
-  init,
-  manifest,
-  legacyManifest,
-  rules,
-} from '../lib/project.js';
+import { agents, findRoot, init, manifest, rules } from '../lib/project.js';
 
 import {
   snapshot,
@@ -36,8 +29,12 @@ import { accept, drafts, propose, switchClient } from '../lib/session.js';
 import { installHook } from '../lib/hooks.js';
 import { check as lint } from '../lib/gate.js';
 
-import { databaseName, dataPrefix, localPrefix } from '../lib/storage.js';
-import { pruneLegacy } from '../lib/migrate.js';
+import {
+  databaseName,
+  dataPrefix,
+  localPrefix,
+  renameDatabase,
+} from '../lib/storage.js';
 import { modelCatalog, connect, signIn } from '../lib/client.js';
 import { inspect } from '../lib/inspect.js';
 import {
@@ -120,6 +117,8 @@ async function main() {
       'aipart init --ai <openai|claude|deepseek> [--upgrade] [--model 模型] [--offline] [--yes]\naipart check [--json]\naipart ask [需求] [--scope 路径] [--stages guide,code,commit,ci] [--resume 编号]\naipart ai use <工具> [--team]\naipart accept <草案编号>\naipart enable|disable <规则编号> [阶段]\naipart hooks install\naipart lint <commit|ci>\naipart recover',
     );
   const root = findRoot(process.cwd());
+  if (renameDatabase(root))
+    console.error('项目数据已从 .aipart.sqlite 改名为 .aipart，请一并提交。');
   const credentials = credentialSession(root);
   if (cmd === 'hooks' && args[0] === 'install') {
     snapshot(root);
@@ -576,15 +575,13 @@ async function main() {
     const selected =
       read(root, manifest) === null ? undefined : snapshot(root).ai;
     const initialAI = values.ai ?? (await chooseAgent(selected));
-    const migrating =
-      read(root, manifest) === null && read(root, legacyManifest) !== null;
     const initialEdits = init(root, initialAI, values.upgrade);
     const scan = await review(initialAI, '.', '', { initial: true });
     const ai = scan?.ai ?? initialAI;
     const edits =
       ai === initialAI ? initialEdits : init(root, ai, values.upgrade);
     if (scan?.model) edits.push(change(root, modelFile(ai), scan.model));
-    if ((selected && selected !== ai) || migrating) {
+    if (selected && selected !== ai) {
       const personal = edits.find((e) => e.name === '@local/settings.json');
       if (personal) personal.after = json({ ai });
       else edits.push(change(root, '@local/settings.json', json({ ai })));
@@ -601,20 +598,6 @@ async function main() {
       panel('将写入', files.length ? files : ['本机连接设置']);
       if (!tty || (await confirm())) apply(root, edits);
       else return;
-      if (migrating) {
-        pruneLegacy(root);
-        if (rules(root).some((r) => r.bindings?.commit?.rule)) {
-          try {
-            installHook(root);
-          } catch (error) {
-            console.error(error.message);
-          }
-        }
-        if (read(root, '.aipart/gate.cjs') !== null)
-          panel('保留了旧目录中的自定义文件', [
-            '请检查 .aipart/gate.cjs 的调用并按需清理。',
-          ]);
-      }
     }
     credentials.flush();
     if (tty) return dashboard();
@@ -631,11 +614,8 @@ async function main() {
   if (cmd === 'ai' && args[0] === 'use') return select(args[1]);
   if (cmd === 'check') {
     if (read(root, manifest) === null) {
-      const status = read(root, legacyManifest)
-        ? '检测到旧版配置'
-        : read(root, 'AGENTS.md') === null
-          ? '未接入'
-          : '已有项目指引，尚未接入';
+      const status =
+        read(root, 'AGENTS.md') === null ? '未接入' : '已有项目指引，尚未接入';
       console.log(
         values.json
           ? JSON.stringify({ initialized: false, status })

@@ -114,7 +114,7 @@ for (const provider of ['openai', 'deepseek']) {
       assert.ok(requests.every((r) => r.authorization === 'Bearer ' + token));
       assert.ok(requests.slice(1).every((r) => r.body.model === model));
       assert.ok(
-        !fs.readFileSync(path.join(cwd, '.aipart.sqlite')).includes(token),
+        !fs.readFileSync(path.join(cwd, '.aipart')).includes(token),
       );
       if (provider === 'openai')
         assert.ok(requests.slice(1).every((r) => r.body.store === false));

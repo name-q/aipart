@@ -135,7 +135,7 @@ test('网关模型列表、只读扫描和规则会话使用同一连接', async
   );
   assert.ok(
     !fs
-      .readFileSync(path.join(cwd, '.aipart.sqlite'))
+      .readFileSync(path.join(cwd, '.aipart'))
       .includes('gateway-fixture'),
   );
 });
