@@ -23,7 +23,7 @@ test('更换工具后复用本地草案，确认后跨工具读取同一规则',
     0,
   );
   assert.deepEqual(fs.readdirSync(cwd), []);
-  call('init', '--ai', 'codex');
+  call('init', '--ai', 'codex', '--offline');
   call('ai', 'use', 'cursor');
   const out = call('ask', '确认原图例外');
   const id = out.match(/草案编号 ([\w-]+)/)[1];
@@ -116,7 +116,7 @@ test('原生会话按项目启动并限定业务目录，离线验证草案的�
     assert.equal(r.status, 0, r.stderr);
     return r.stdout;
   }
-  run('init', '--ai', 'pi');
+  run('init', '--ai', 'pi', '--offline');
   run(
     'ask',
     '--scope',

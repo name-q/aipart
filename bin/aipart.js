@@ -1,6 +1,15 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { createInterface } from 'node:readline/promises';
+import {
+  tty,
+  menu,
+  multiple,
+  question,
+  confirm as approve,
+  heading,
+  panel,
+  progress,
+} from '../lib/ui.js';
 import { apply, change, json, read, recover } from '../lib/files.js';
 import { agents, findRoot, init, manifest, rules } from '../lib/project.js';
 
@@ -11,22 +20,35 @@ import { accept, drafts, propose, switchClient } from '../lib/session.js';
 import { installHook } from '../lib/hooks.js';
 import gate from '../lib/gate.cjs';
 
+import { assess } from '../lib/client.js';
 import { inspect } from '../lib/inspect.js';
-const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
-async function question(label) {
-  if (!tty) throw Error('此操作需要交互终端');
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    return (await rl.question(label + ' ')).trim();
-  } finally {
-    rl.close();
-  }
-}
-async function chooseAgent() {
-  const answer = await question(
-    agents.map((name, index) => index + 1 + '. ' + name).join('   '),
+const toolNames = {
+  codex: 'Codex',
+  claude: 'Claude Code',
+  pi: 'Pi',
+  cursor: 'Cursor',
+};
+const stagesLabels = {
+  guide: '团队指引',
+  code: '编辑器和 ESLint',
+  commit: '提交前检查',
+  ci: 'CI 校验',
+};
+const choice = (value, name, description) => ({ value, name, description });
+function chooseAgent(selected) {
+  return menu(
+    '选择你使用的工具',
+    agents.map((name) =>
+      choice(
+        name,
+        toolNames[name],
+        name === 'cursor'
+          ? '复制任务到 Cursor IDE 继续'
+          : '沿用本机已登录的客户端',
+      ),
+    ),
+    selected,
   );
-  return agents[Number(answer) - 1] ?? answer;
 }
 function toggle(item, stage, enabled) {
   const next = structuredClone(item);
@@ -56,12 +78,13 @@ async function main() {
       stages: { type: 'string' },
       resume: { type: 'string' },
       team: { type: 'boolean' },
+      offline: { type: 'boolean' },
     },
   });
   if (values.version) return console.log('0.1.0');
   if (!cmd || values.help)
     return console.log(
-      'aipart init --ai <codex|claude|pi|cursor> [--upgrade] [--yes]\naipart check [--json]\naipart ask [需求] [--scope 路径] [--stages guide,code,commit,ci] [--resume 编号]\naipart ai use <工具> [--team]\naipart accept <草案编号>\naipart enable|disable <规则编号> [阶段]\naipart hooks install\naipart lint <commit|ci>\naipart recover',
+      'aipart init --ai <codex|claude|pi|cursor> [--upgrade] [--offline] [--yes]\naipart check [--json]\naipart ask [需求] [--scope 路径] [--stages guide,code,commit,ci] [--resume 编号]\naipart ai use <工具> [--team]\naipart accept <草案编号>\naipart enable|disable <规则编号> [阶段]\naipart hooks install\naipart lint <commit|ci>\naipart recover',
     );
   const root = findRoot(process.cwd());
   if (cmd === 'hooks' && args[0] === 'install') {
@@ -73,40 +96,70 @@ async function main() {
     return;
   }
   if (cmd === 'recover') return recover(root);
-  if (cmd === 'init') {
-    const ai = values.ai ?? (await chooseAgent());
-    const edits = init(root, ai, values.upgrade);
-    if (read(root, manifest) !== null && snapshot(root).ai !== ai)
-      edits.push(change(root, '.aipart/local/settings.json', json({ ai })));
-    const env = inspect(root);
-    console.log(
-      '工程配置：' +
-        ([...env.files, ...env.packages.map((p) => p.file), ...env.ci].join(
-          ' ',
-        ) || '未发现'),
-    );
-    const files = edits.filter((c) => c.before !== c.after).map((c) => c.name);
-    if (!files.length) return console.log('项目配置已是当前版本');
-    console.log(files.join('\n'));
-    if (values.yes || !tty || (await question('写入以上配置？[y/N]')) === 'y')
-      apply(root, edits);
-    return;
-  }
-  const confirm = async () =>
-    values.yes || (await question('确认写入？[y/N]')) === 'y';
+  const confirm = () => values.yes || approve('保存以上改动？');
+  const review = async (ai, scope, request) => {
+    if (values.offline) return null;
+    if (ai === 'cursor') {
+      if (tty) panel('Cursor IDE', ['规则和草案可在 IDE 中继续']);
+      return null;
+    }
+    for (;;) {
+      try {
+        const result = await progress(
+          '连接 ' + toolNames[ai] + ' 并读取项目',
+          () => assess(root, ai, { scope, request }),
+        );
+        panel('扫描完成 · ' + toolNames[ai], [
+          result.summary,
+          ...result.findings,
+        ]);
+        return result;
+      } catch (error) {
+        if (!tty) throw error;
+        panel('连接未完成', [error.message]);
+        const action = await menu('接下来怎么做？', [
+          choice('retry', '重试连接'),
+          choice('offline', '仅用本地检查'),
+          choice('cancel', '取消'),
+        ]);
+        if (action === 'offline') return null;
+        if (action === 'cancel')
+          throw Object.assign(Error('已取消'), { name: 'ExitPromptError' });
+      }
+    }
+  };
   const ask = async (request) => {
     let stages = values.stages;
+    if (tty && !request && !values.resume)
+      request = await question('希望项目遵循哪条规则？');
     if (!stages && tty && !values.resume) {
-      const ci = inspect(root).ci;
-      const menu = [
-        'guide 指引',
-        'code 代码',
-        'commit 提交',
-        ...(ci.length ? ['ci 流水线'] : []),
-      ];
-      stages = await question(menu.join(' / ') + '（逗号组合，回车为 guide）');
-      if (!ci.length && stages.split(',').includes('ci'))
-        throw Error('未发现流水线，外部流水线可显式传入 --stages ci');
+      const scope = values.scope ?? '.';
+      const scan = await review(values.ai ?? snapshot(root).ai, scope, request);
+      const ci = inspect(root, scope).ci;
+      stages = (
+        await multiple('规则在哪里生效？', [
+          {
+            ...choice('guide', stagesLabels.guide, '记录业务约定，供团队参考'),
+            checked: !scan || scan.recommend.includes('guide'),
+          },
+          {
+            ...choice('code', stagesLabels.code, '编辑或运行 lint 时反馈'),
+            checked: scan?.recommend.includes('code'),
+          },
+          {
+            ...choice('commit', stagesLabels.commit, '只检查本次暂存的文件'),
+            checked: scan?.recommend.includes('commit'),
+          },
+          ...(ci.length
+            ? [
+                {
+                  ...choice('ci', stagesLabels.ci, '接入项目已有流水线'),
+                  checked: scan?.recommend.includes('ci'),
+                },
+              ]
+            : []),
+        ])
+      ).join(',');
     }
     await propose(
       root,
@@ -131,6 +184,108 @@ async function main() {
     );
     if (!tty || (await confirm())) apply(root, edits);
   };
+  const dashboard = async () => {
+    while (true) {
+      const state = snapshot(root);
+      const enabled = state.rules.filter((r) => r.enabled);
+      heading(
+        '项目控制台',
+        toolNames[state.ai] +
+          '  ·  ' +
+          enabled.length +
+          '/' +
+          state.rules.length +
+          ' 条规则启用',
+      );
+      if (state.issues.length) panel('需要处理', state.issues);
+      const action = await menu('下一步', [
+        choice('view', '查看规则', '查看生效范围、校验方式和业务例外'),
+        choice('add', '新增规则', '根据当前项目选择规则和校验位置'),
+        choice('toggle', '启用或停用', '调整整条规则或其中一个执行阶段'),
+        choice('switch', '切换工具', '使用另一款工具继续'),
+        choice('draft', '继续草案', '恢复未完成的规则'),
+        choice('quit', '退出'),
+      ]);
+      if (action === 'quit') return;
+      if (action === 'add') await ask('');
+      if (action === 'switch') await select(await chooseAgent(state.ai));
+      if (action === 'draft') {
+        const list = drafts(root);
+        if (!list.length) panel('草案', ['暂无草案']);
+        else {
+          const resume = await menu('选择草案', [
+            ...list.map((id) => choice(id, id)),
+            choice('', '返回'),
+          ]);
+          if (resume) await propose(root, { resume }, question, confirm);
+        }
+      }
+      if (action === 'view' || action === 'toggle') {
+        const id = await menu('选择规则', [
+          ...state.rules.map((r) =>
+            choice(r.id, (r.enabled ? '●  ' : '○  ') + r.title, r.scope),
+          ),
+          choice('', '返回'),
+        ]);
+        if (!id) continue;
+        const rule = state.rules.find((r) => r.id === id);
+        if (action === 'view') {
+          panel(rule.title, [
+            rule.decision,
+            ...(rule.exceptions ? ['例外 · ' + rule.exceptions] : []),
+            '范围 · ' + rule.scope,
+            ...Object.entries(rule.stages).map(
+              ([key, level]) =>
+                stagesLabels[key] +
+                ' · ' +
+                ({ warn: '提醒', error: '阻断' }[level] ?? '已停用'),
+            ),
+          ]);
+          await menu('规则详情', [choice('back', '返回控制台')]);
+        } else {
+          const stage = await menu('选择执行阶段', [
+            choice('all', '整条规则'),
+            ...Object.keys(rule.stages).map((key) =>
+              choice(key, stagesLabels[key]),
+            ),
+            choice('', '返回'),
+          ]);
+          if (!stage) continue;
+          const key = stage === 'all' ? undefined : stage;
+          const next = toggle(
+            rule,
+            key,
+            !(key ? rule.stages[key] : rule.enabled),
+          );
+          if (await confirm()) apply(root, updateRule(root, next, rule));
+        }
+      }
+    }
+  };
+  if (cmd === 'init') {
+    if (tty) heading('项目设置', '选择工具  →  检查项目  →  管理规则');
+    const ai = values.ai ?? (await chooseAgent());
+    const edits = init(root, ai, values.upgrade);
+    await review(ai, '.', '');
+    if (read(root, manifest) !== null && snapshot(root).ai !== ai)
+      edits.push(change(root, '.aipart/local/settings.json', json({ ai })));
+    const env = inspect(root);
+    console.log(
+      '工程配置：' +
+        ([...env.files, ...env.packages.map((p) => p.file), ...env.ci].join(
+          ' ',
+        ) || '未发现'),
+    );
+    const files = edits.filter((c) => c.before !== c.after).map((c) => c.name);
+    if (files.length) {
+      panel('将写入', files);
+      if (!tty || (await confirm())) apply(root, edits);
+      else return;
+    }
+    if (tty) return dashboard();
+    console.log('项目配置就绪');
+    return;
+  }
   if (cmd === 'ask') return ask(args.join(' '));
   if (cmd === 'accept') return accept(root, args[0], confirm);
   if (cmd === 'ai' && args[0] === 'use') return select(args[1]);
@@ -151,6 +306,7 @@ async function main() {
       if (state.issues.length) process.exitCode = 1;
       return;
     }
+    if (tty) return dashboard();
     console.log(
       '当前 ' +
         state.ai +
@@ -172,28 +328,6 @@ async function main() {
       );
     for (const issue of state.issues) console.error(issue);
     if (state.issues.length) process.exitCode = 1;
-    if (tty) {
-      const choice = await question(
-        '1 查看详情  2 新增规则  3 启用或停用  4 切换工具  5 未完成草案  回车退出',
-      );
-      if (choice === '1') console.log(JSON.stringify(state, null, 2));
-      if (choice === '2') return ask(await question('输入需求：'));
-      if (choice === '4') return select(await chooseAgent());
-      if (choice === '5') console.log(drafts(root).join('\n') || '没有草案');
-      if (choice === '3') {
-        const id = await question('规则编号：');
-        const stage = await question('阶段（回车为整条规则）：');
-        const rule = state.rules.find((r) => r.id === id);
-        if (!rule || (stage && !(stage in rule.stages)))
-          throw Error('规则或阶段不存在');
-        const next = toggle(
-          rule,
-          stage,
-          !(stage ? rule.stages[stage] : rule.enabled),
-        );
-        if (await confirm()) apply(root, updateRule(root, next, rule));
-      }
-    }
     return;
   }
   if (cmd === 'enable' || cmd === 'disable') {
@@ -206,6 +340,7 @@ async function main() {
   throw Error('未知命令：' + [cmd, ...args].join(' '));
 }
 main().catch((e) => {
+  if (e.name === 'ExitPromptError' || e.name === 'AbortPromptError') return;
   console.error(e.message);
   process.exitCode = 1;
 });
