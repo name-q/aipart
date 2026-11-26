@@ -139,3 +139,27 @@ test('网关模型列表、只读扫描和规则会话使用同一连接', async
       .includes('gateway-fixture'),
   );
 });
+
+test('保留网关禁用凭据的业务错误，提示在网关端处理', async (t) => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'aipart-claude-rejected-'));
+  const previousPath = process.env.PATH;
+  process.env.PATH = cwd + path.delimiter + previousPath;
+  t.after(() => {
+    process.env.PATH = previousPath;
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+  fs.writeFileSync(
+    path.join(cwd, 'claude'),
+    [
+      '#!/usr/bin/env node',
+      'if(process.argv[2]==="--version")return;',
+      'console.log(JSON.stringify({type:"result",is_error:true,result:"API Error: 400 凭据 #2 已被禁用"}));',
+      'process.exitCode=1;',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+  await assert.rejects(
+    assess(cwd, 'claude', { model: 'gateway-test' }),
+    /网关报告凭据已被禁用，请在网关端启用或更换凭据/,
+  );
+});
