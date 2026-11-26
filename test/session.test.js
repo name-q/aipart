@@ -214,6 +214,7 @@ test('Codex 返回完成事件后可以初始化，客户端进程无需先退�
   );
   assert.equal(result.status, 0, result.error?.message ?? result.stderr);
   assert.match(result.stdout, /Codex \/ test/);
+  assert.doesNotMatch(result.stderr, /SQLite is an experimental feature/);
   assert.ok(fs.existsSync(path.join(cwd, '.aipart.sqlite')));
 });
 
