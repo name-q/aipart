@@ -21,6 +21,7 @@
     "eslint": "9.39.1"
   },
   "dependencies": {
-    "@inquirer/prompts": "7.10.1"
+    "@inquirer/prompts": "7.10.1",
+    "jose": "6.2.18"
   }
 }

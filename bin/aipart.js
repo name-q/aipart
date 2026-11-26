@@ -40,7 +40,14 @@ import { databaseName, dataPrefix, localPrefix } from '../lib/storage.js';
 import { pruneLegacy } from '../lib/migrate.js';
 import { modelCatalog, connect, signIn } from '../lib/client.js';
 import { inspect } from '../lib/inspect.js';
-import { isApiClient, apiKeyName, useApiKey } from '../lib/api-client.js';
+import {
+  isApiClient,
+  apiKeyName,
+  useApiKey,
+  useChatGPT,
+  hasCredential,
+} from '../lib/api-client.js';
+import { signInWithChatGPT } from '../lib/chatgpt-auth.js';
 const toolNames = {
   openai: 'OpenAI',
   codex: 'Codex',
@@ -65,7 +72,9 @@ function chooseAgent(selected) {
         name,
         toolNames[name],
         isApiClient(name)
-          ? '使用 ' + apiKeyName(name) + ' 直接访问服务'
+          ? name === 'openai'
+            ? '使用 ChatGPT 登录或 OpenAI API Key'
+            : '使用 ' + apiKeyName(name) + ' 直接访问服务'
           : '沿用本机已登录的客户端',
       ),
     ),
@@ -141,6 +150,24 @@ async function main() {
       panel('认证未完成', [error.message]);
     }
   };
+  const chatgptLogin = async (newAccount = false) => {
+    try {
+      useChatGPT(
+        await signInWithChatGPT({
+          newAccount,
+          show: (url) => {
+            panel('等待 ChatGPT 授权', [
+              '请在浏览器完成登录。如果浏览器没有打开，请访问下方链接。',
+              url,
+            ]);
+          },
+        }),
+      );
+      panel('ChatGPT 已连接', ['正在从 OpenAI 读取此账号的模型列表。']);
+    } catch (error) {
+      panel('ChatGPT 登录未完成', [error.message]);
+    }
+  };
   const chooseModel = async (ai, current, { initial = false } = {}) => {
     for (;;) {
       let models = [];
@@ -157,14 +184,11 @@ async function main() {
           catalogError?.message ??
             '请确认客户端已安装并登录，或输入已知的模型 ID。',
         ]);
-      const ordered = current
-        ? [
-            ...models.filter((m) => m.id === current),
-            ...models.filter((m) => m.id !== current),
-          ]
-        : models;
       const choices = [
-        ...ordered.map((m) =>
+        ...(ai === 'openai' && !models.length
+          ? [choice('chatgpt', '使用 ChatGPT 登录')]
+          : []),
+        ...models.map((m) =>
           choice(
             'model=' + m.id,
             ai === 'claude' ? m.id + ' · ' + m.label : m.label,
@@ -180,6 +204,16 @@ async function main() {
               choice('refresh', '重新读取模型'),
             ]
           : []),
+        ...(ai === 'openai' && models.length
+          ? [choice('chatgpt', '使用 ChatGPT 登录')]
+          : []),
+        ...(ai === 'openai'
+          ? [choice('other-chatgpt', '使用其他 ChatGPT 账号')]
+          : []),
+        ...(ai === 'openai' && models.length
+          ? [choice('login', '改用 OpenAI API Key')]
+          : []),
+        ...(models.length ? [choice('refresh', '重新读取模型')] : []),
         choice('manual', '手动输入模型 ID'),
         ...(initial
           ? [choice('offline', '仅用本地检查'), choice('cancel', '取消初始化')]
@@ -198,6 +232,11 @@ async function main() {
               current ? 'model=' + current : undefined,
             );
       if (selection === 'refresh') continue;
+      if (selection === 'chatgpt' || selection === 'other-chatgpt') {
+        await chatgptLogin(selection === 'other-chatgpt');
+        current = undefined;
+        continue;
+      }
       if (selection === 'login') {
         await login(ai);
         continue;
@@ -243,6 +282,9 @@ async function main() {
           ...(error.code === 'SCAN_TIMEOUT'
             ? [choice('switch', '换一个工具继续')]
             : []),
+          ...(ai === 'openai' && error.code === 'AUTH_REQUIRED'
+            ? [choice('chatgpt', '使用 ChatGPT 登录')]
+            : []),
           choice('model', '选择其他模型'),
           ...(error.code === 'SCAN_TIMEOUT'
             ? []
@@ -282,6 +324,11 @@ async function main() {
               model = next.model;
             }
           }
+        }
+        if (action === 'chatgpt') {
+          await chatgptLogin();
+          const next = await chooseModel(ai, undefined);
+          if (next.model) model = next.model;
         }
         if (action === 'model') {
           const next = await chooseModel(ai, model);
@@ -331,6 +378,11 @@ async function main() {
             : []),
         ])
       ).join(',');
+    }
+    if (tty && isApiClient(ai) && !hasCredential(ai)) {
+      const selection = await chooseModel(ai, selectedModel(ai));
+      if (!selection.model) return;
+      sessionModels.set(ai, selection.model);
     }
     await propose(
       root,
