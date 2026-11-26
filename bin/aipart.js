@@ -4,6 +4,7 @@ import {
   tty,
   menu,
   searchableMenu,
+  secret,
   multiple,
   question,
   confirm as approve,
@@ -39,11 +40,12 @@ import { databaseName, dataPrefix, localPrefix } from '../lib/storage.js';
 import { pruneLegacy } from '../lib/migrate.js';
 import { modelCatalog, connect, signIn } from '../lib/client.js';
 import { inspect } from '../lib/inspect.js';
+import { isApiClient, apiKeyName, useApiKey } from '../lib/api-client.js';
 const toolNames = {
+  openai: 'OpenAI',
   codex: 'Codex',
   claude: 'Claude Code',
-  pi: 'Pi',
-  cursor: 'Cursor',
+  deepseek: 'DeepSeek',
 };
 function changedFiles(edits) {
   return [
@@ -62,11 +64,9 @@ function chooseAgent(selected) {
       choice(
         name,
         toolNames[name],
-        name === 'cursor'
-          ? '复制任务到 Cursor IDE 继续'
-          : name === 'pi'
-            ? '使用 Pi 已登录的服务商，例如 OpenAI 或 OpenAI Codex'
-            : '沿用本机已登录的客户端',
+        isApiClient(name)
+          ? '使用 ' + apiKeyName(name) + ' 直接访问服务'
+          : '沿用本机已登录的客户端',
       ),
     ),
     selected,
@@ -107,7 +107,7 @@ async function main() {
   if (values.version) return console.log('0.1.0');
   if (!cmd || values.help)
     return console.log(
-      'aipart init --ai <codex|claude|pi|cursor> [--upgrade] [--model 模型] [--offline] [--yes]\naipart check [--json]\naipart ask [需求] [--scope 路径] [--stages guide,code,commit,ci] [--resume 编号]\naipart ai use <工具> [--team]\naipart accept <草案编号>\naipart enable|disable <规则编号> [阶段]\naipart hooks install\naipart lint <commit|ci>\naipart recover',
+      'aipart init --ai <openai|codex|claude|deepseek> [--upgrade] [--model 模型] [--offline] [--yes]\naipart check [--json]\naipart ask [需求] [--scope 路径] [--stages guide,code,commit,ci] [--resume 编号]\naipart ai use <工具> [--team]\naipart accept <草案编号>\naipart enable|disable <规则编号> [阶段]\naipart hooks install\naipart lint <commit|ci>\naipart recover',
     );
   const root = findRoot(process.cwd());
   if (cmd === 'hooks' && args[0] === 'install') {
@@ -128,25 +128,34 @@ async function main() {
     read(root, modelFile(ai)) ??
     undefined;
   const login = async (ai, device = false) => {
-    if (ai === 'pi')
-      panel('Pi 登录', [
-        '在 Pi 输入 /login 并选择服务商，完成后退出 Pi 继续。',
-      ]);
     try {
-      signIn(root, ai, device);
+      if (isApiClient(ai)) {
+        const key = await secret(
+          '输入 ' + toolNames[ai] + ' API Key（仅用于本次运行）',
+        );
+        useApiKey(ai, key);
+      } else signIn(root, ai, device);
     } catch (error) {
-      panel('登录未完成', [error.message]);
+      if (error.name === 'ExitPromptError' || error.name === 'AbortPromptError')
+        throw error;
+      panel('认证未完成', [error.message]);
     }
   };
   const chooseModel = async (ai, current, { initial = false } = {}) => {
     for (;;) {
-      const models = await progress(
-        '读取 ' + toolNames[ai] + ' 的模型列表',
-        () => modelCatalog(root, ai),
-      );
+      let models = [];
+      let catalogError;
+      try {
+        models = await progress('读取 ' + toolNames[ai] + ' 的模型列表', () =>
+          modelCatalog(root, ai),
+        );
+      } catch (error) {
+        catalogError = error;
+      }
       if (!models.length)
         panel('暂无模型列表', [
-          '请确认客户端已安装并登录，或输入已知的模型 ID。',
+          catalogError?.message ??
+            '请确认客户端已安装并登录，或输入已知的模型 ID。',
         ]);
       const ordered = current
         ? [
@@ -158,17 +167,16 @@ async function main() {
         ...ordered.map((m) =>
           choice(
             'model=' + m.id,
-            ai === 'pi'
-              ? m.id
-              : ai === 'claude'
-                ? m.id + ' · ' + m.label
-                : m.label,
+            ai === 'claude' ? m.id + ' · ' + m.label : m.label,
             m.description ? m.id + ' · ' + m.description : m.id,
           ),
         ),
         ...(!models.length
           ? [
-              choice('login', '登录后刷新列表'),
+              choice(
+                'login',
+                isApiClient(ai) ? '输入 API Key 后刷新列表' : '登录后刷新列表',
+              ),
               choice('refresh', '重新读取模型'),
             ]
           : []),
@@ -179,7 +187,7 @@ async function main() {
       ];
       const label = '选择 ' + toolNames[ai] + ' 模型';
       const selection =
-        ai === 'pi' && models.length
+        isApiClient(ai) && models.length
           ? await searchableMenu(
               label + '（可输入服务商或模型名搜索）',
               choices,
@@ -203,10 +211,6 @@ async function main() {
   };
   const review = async (ai, scope, request, { initial = false } = {}) => {
     if (values.offline) return null;
-    if (ai === 'cursor') {
-      if (tty) panel('Cursor IDE', ['规则和草案可在 IDE 中继续']);
-      return null;
-    }
     let model = selectedModel(ai);
     if (initial && tty && !values.model) {
       const selection = await chooseModel(ai, model, { initial: true });
@@ -251,7 +255,7 @@ async function main() {
             : [
                 choice(
                   'login',
-                  ai === 'pi' ? '在 Pi 中登录' : '登录 Claude Code',
+                  isApiClient(ai) ? '输入 API Key' : '登录 Claude Code',
                 ),
               ]),
           choice('retry', '重试连接'),
@@ -264,7 +268,7 @@ async function main() {
         if (action === 'switch') {
           const nextAI = await menu('选择接下来使用的工具', [
             ...agents
-              .filter((name) => name !== ai && name !== 'cursor')
+              .filter((name) => name !== ai)
               .map((name) => choice(name, toolNames[name])),
             choice('back', '返回连接菜单'),
           ]);
@@ -293,6 +297,7 @@ async function main() {
   };
   const ask = async (request) => {
     const startingAI = values.ai ?? snapshot(root).ai;
+    if (!startingAI) throw Error('请运行 aipart init 重新选择工具。');
     let ai = startingAI;
     let stages = values.stages;
     if (tty && !request && !values.resume)
@@ -353,7 +358,7 @@ async function main() {
       const enabled = state.rules.filter((r) => r.enabled);
       heading(
         '项目控制台',
-        toolNames[state.ai] +
+        (toolNames[state.ai] ?? '请选择工具') +
           '  ·  ' +
           enabled.length +
           '/' +

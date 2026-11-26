@@ -27,7 +27,7 @@ test('提交按暂存内容校验，保留旧钩子和未暂存修改', (t) => {
   put('eslint.config.cjs', 'module.exports=[{files:["**/*.js"],rules:{}}];\n');
   put('.git/hooks/pre-commit', '#!/bin/sh\nexit 17\n');
   fs.chmodSync(path.join(root, '.git/hooks/pre-commit'), 0o755);
-  apply(root, init(root, 'pi'));
+  apply(root, init(root, 'deepseek'));
   const binding = { rule: 'no-debugger', options: [] };
   const rule = makeRule(root, {
     scope: '.',

@@ -16,6 +16,7 @@ test('更换工具后复用本地草案，确认后跨工具读取同一规则',
     const result = spawnSync(process.execPath, [cli, ...args], {
       cwd,
       encoding: 'utf8',
+      env: { ...process.env, PATH: cwd + path.delimiter + process.env.PATH },
     });
     assert.equal(result.status, 0, result.stderr);
     return result.stdout;
@@ -26,7 +27,12 @@ test('更换工具后复用本地草案，确认后跨工具读取同一规则',
   );
   assert.deepEqual(fs.readdirSync(cwd), []);
   call('init', '--ai', 'codex', '--offline');
-  call('ai', 'use', 'cursor');
+  fs.writeFileSync(
+    path.join(cwd, 'claude'),
+    '#!/usr/bin/env node\nif(process.argv[2]!=="--version")console.log(process.argv.at(-1));\n',
+    { mode: 0o755 },
+  );
+  call('ai', 'use', 'claude');
   const out = call('ask', '确认原图例外');
   const id = out.match(/草案编号 ([\w-]+)/)[1];
   assert.match(call('ask', '--resume', id), /继续已有草案/);
@@ -46,7 +52,7 @@ test('更换工具后复用本地草案，确认后跨工具读取同一规则',
   call('accept', id, '--yes');
   const state = JSON.parse(call('check', '--json'));
   assert.equal(state.defaultAI, 'codex');
-  assert.equal(state.ai, 'cursor');
+  assert.equal(state.ai, 'claude');
   assert.match(
     fs.readFileSync(path.join(cwd, 'AGENTS.md'), 'utf8'),
     /头像可压缩/,
@@ -94,14 +100,14 @@ test('原生会话按项目启动并限定业务目录，离线验证草案的�
     },
   };
   fs.writeFileSync(
-    path.join(bin, 'pi'),
+    path.join(bin, 'codex'),
     [
       '#!/usr/bin/env node',
       'if(process.argv[2]==="--version")process.exit(0);',
       'const p=process.argv.at(-1);',
       'if(process.cwd()!==' +
         JSON.stringify(cwd) +
-        ' || process.argv.length!==4)process.exit(3);',
+        ' || process.argv.length!==6)process.exit(3);',
       'const file=p.split("\\n").find(l=>l.startsWith("草案绝对路径：")).slice("草案绝对路径：".length);',
       'require("node:fs").writeFileSync(file,' +
         JSON.stringify(JSON.stringify(draft)) +
@@ -118,7 +124,7 @@ test('原生会话按项目启动并限定业务目录，离线验证草案的�
     assert.equal(r.status, 0, r.stderr);
     return r.stdout;
   }
-  run('init', '--ai', 'pi', '--offline');
+  run('init', '--ai', 'codex', '--offline');
   run(
     'ask',
     '--scope',
@@ -212,15 +218,15 @@ test('Codex 返回完成事件后可以初始化，客户端进程无需先退�
 });
 
 test('模型用按阶段分组的对象回复时保留非空的建议', (t) => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'aipart-pi-result-'));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'aipart-scan-result-'));
   t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
   fs.writeFileSync(
-    path.join(cwd, 'pi'),
+    path.join(cwd, 'claude'),
     [
       '#!/usr/bin/env node',
       'if(process.argv[2]==="--version")return;',
       'const result={summary:"前端项目",findings:[],recommend:{guide:["团队约定"],code:[],commit:false,ci:[]}};',
-      'console.log(JSON.stringify({type:"message_end",message:{role:"assistant",content:[{type:"text",text:JSON.stringify(result)}]}}));',
+      'console.log(JSON.stringify({result:JSON.stringify(result)}));',
     ].join('\n'),
     { mode: 0o755 },
   );
@@ -230,7 +236,7 @@ test('模型用按阶段分组的对象回复时保留非空的建议', (t) => {
     [
       '--input-type=module',
       '-e',
-      'const {assess}=await import(process.argv[1]); console.log(JSON.stringify(await assess(process.cwd(),"pi")));',
+      'const {assess}=await import(process.argv[1]); console.log(JSON.stringify(await assess(process.cwd(),"claude")));',
       client,
     ],
     {

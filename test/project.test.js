@@ -58,7 +58,7 @@ test('关闭代码检查时保留其他编辑和确认摘要', (t) => {
 
 test('过期预览拒绝覆盖新修改，中断的写入可以恢复', (t) => {
   const root = fixture(t);
-  apply(root, init(root, 'pi'));
+  apply(root, init(root, 'deepseek'));
   const edit = change(root, 'one.txt', 'A');
   fs.writeFileSync(path.join(root, 'one.txt'), 'B');
   assert.throws(() => apply(root, [edit]), /变化/);
@@ -72,7 +72,7 @@ test('过期预览拒绝覆盖新修改，中断的写入可以恢复', (t) => {
 
 test('业务样例验证失败时恢复待审草案和旧配置', (t) => {
   const root = fixture(t);
-  apply(root, init(root, 'pi'));
+  apply(root, init(root, 'deepseek'));
   fs.writeFileSync(path.join(root, 'pending.json'), '等待确认');
   const edits = [
     change(root, 'pending.json', null),
@@ -123,7 +123,7 @@ test('迁移旧规则和草案到单库与个人目录，保留手工指引', as
     json({ stages: ['guide'], scope: '.' }),
   );
   fs.writeFileSync(path.join(root, '.aipart/.gitignore'), '/local/\n');
-  apply(root, init(root, 'pi'));
+  apply(root, init(root, 'deepseek'));
   pruneLegacy(root);
   assert.deepEqual(fs.readdirSync(root).sort(), [
     '.aipart.sqlite',
@@ -133,4 +133,30 @@ test('迁移旧规则和草案到单库与个人目录，保留手工指引', as
   assert.equal(rules(root)[0].enabled, false);
   assert.ok(read(root, '@local/drafts/' + draft + '.session.json'));
   assert.match(read(root, 'AGENTS.md'), /^团队说明/);
+});
+
+test('旧工具停用后可重新选择提供方，已有项目规则继续生效', async (t) => {
+  const root = fixture(t);
+  const { project, manifest } = await import('../lib/project.js');
+  apply(root, init(root, 'codex'));
+  const old = project(root);
+  apply(root, [
+    change(
+      root,
+      manifest,
+      json({
+        ...old,
+        defaultAI: 'retired-client',
+        initialAI: 'retired-client',
+        agents: ['retired-client'],
+      }),
+    ),
+    change(root, '@local/settings.json', json({ ai: 'retired-client' })),
+  ]);
+  assert.equal(snapshot(root).ai, null);
+  apply(root, init(root, 'openai'));
+  const state = snapshot(root);
+  assert.equal(state.ai, 'openai');
+  assert.deepEqual(state.agents, ['openai']);
+  assert.equal(state.rules[0].id, 'reuse');
 });
