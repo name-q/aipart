@@ -3,6 +3,7 @@ import { parseArgs } from 'node:util';
 import {
   tty,
   menu,
+  searchableMenu,
   multiple,
   question,
   confirm as approve,
@@ -63,7 +64,9 @@ function chooseAgent(selected) {
         toolNames[name],
         name === 'cursor'
           ? '复制任务到 Cursor IDE 继续'
-          : '沿用本机已登录的客户端',
+          : name === 'pi'
+            ? '使用 Pi 已登录的服务商，例如 OpenAI 或 OpenAI Codex'
+            : '沿用本机已登录的客户端',
       ),
     ),
     selected,
@@ -119,9 +122,9 @@ async function main() {
   const confirm = () => values.yes || approve('保存以上改动？');
   const sessionModels = new Map();
   const modelFile = (ai) => '@local/model-' + ai + '.txt';
-  const selectedModel = (ai) =>
+  const selectedModel = (ai, includeOverride = true) =>
     sessionModels.get(ai) ??
-    values.model ??
+    (includeOverride ? values.model : undefined) ??
     read(root, modelFile(ai)) ??
     undefined;
   const login = async (ai, device = false) => {
@@ -145,32 +148,47 @@ async function main() {
         panel('暂无模型列表', [
           '请确认客户端已安装并登录，或输入已知的模型 ID。',
         ]);
-      const selection = await menu(
-        '选择 ' + toolNames[ai] + ' 模型',
-        [
-          ...models.map((m) =>
-            choice(
-              'model=' + m.id,
-              ai === 'claude' ? m.id + ' · ' + m.label : m.label,
-              m.description ? m.id + ' · ' + m.description : m.id,
-            ),
+      const ordered = current
+        ? [
+            ...models.filter((m) => m.id === current),
+            ...models.filter((m) => m.id !== current),
+          ]
+        : models;
+      const choices = [
+        ...ordered.map((m) =>
+          choice(
+            'model=' + m.id,
+            ai === 'pi'
+              ? m.id
+              : ai === 'claude'
+                ? m.id + ' · ' + m.label
+                : m.label,
+            m.description ? m.id + ' · ' + m.description : m.id,
           ),
-          ...(!models.length
-            ? [
-                choice('login', '登录后刷新列表'),
-                choice('refresh', '重新读取模型'),
-              ]
-            : []),
-          choice('manual', '手动输入模型 ID'),
-          ...(initial
-            ? [
-                choice('offline', '仅用本地检查'),
-                choice('cancel', '取消初始化'),
-              ]
-            : [choice('back', '返回连接菜单')]),
-        ],
-        current ? 'model=' + current : undefined,
-      );
+        ),
+        ...(!models.length
+          ? [
+              choice('login', '登录后刷新列表'),
+              choice('refresh', '重新读取模型'),
+            ]
+          : []),
+        choice('manual', '手动输入模型 ID'),
+        ...(initial
+          ? [choice('offline', '仅用本地检查'), choice('cancel', '取消初始化')]
+          : [choice('back', '返回连接菜单')]),
+      ];
+      const label = '选择 ' + toolNames[ai] + ' 模型';
+      const selection =
+        ai === 'pi' && models.length
+          ? await searchableMenu(
+              label + '（可输入服务商或模型名搜索）',
+              choices,
+            )
+          : await menu(
+              label,
+              choices,
+              current ? 'model=' + current : undefined,
+            );
       if (selection === 'refresh') continue;
       if (selection === 'login') {
         await login(ai);
@@ -210,12 +228,18 @@ async function main() {
             (result.model ? ' / ' + result.model : ''),
           [result.summary, ...result.findings],
         );
-        return result;
+        return { ...result, ai };
       } catch (error) {
         if (!tty) throw error;
         panel('连接未完成', [error.message]);
         const action = await menu('接下来怎么做？', [
+          ...(error.code === 'SCAN_TIMEOUT'
+            ? [choice('switch', '换一个工具继续')]
+            : []),
           choice('model', '选择其他模型'),
+          ...(error.code === 'SCAN_TIMEOUT'
+            ? []
+            : [choice('switch', '换一个工具继续')]),
           ...(ai === 'codex'
             ? [
                 choice('login', '在浏览器登录 ChatGPT', '登录完成后会重新连接'),
@@ -234,6 +258,24 @@ async function main() {
         if (action === 'offline') return null;
         if (action === 'cancel')
           throw Object.assign(Error('已取消'), { name: 'ExitPromptError' });
+        if (action === 'switch') {
+          const nextAI = await menu('选择接下来使用的工具', [
+            ...agents
+              .filter((name) => name !== ai && name !== 'cursor')
+              .map((name) => choice(name, toolNames[name])),
+            choice('back', '返回连接菜单'),
+          ]);
+          if (nextAI !== 'back') {
+            const next = await chooseModel(
+              nextAI,
+              selectedModel(nextAI, false),
+            );
+            if (next.model) {
+              ai = nextAI;
+              model = next.model;
+            }
+          }
+        }
         if (action === 'model') {
           const next = await chooseModel(ai, model);
           if (next.model) model = next.model;
@@ -247,12 +289,15 @@ async function main() {
     }
   };
   const ask = async (request) => {
+    const startingAI = values.ai ?? snapshot(root).ai;
+    let ai = startingAI;
     let stages = values.stages;
     if (tty && !request && !values.resume)
       request = await question('希望项目遵循哪条规则？');
     if (!stages && tty && !values.resume) {
       const scope = validateScope(root, values.scope ?? '.');
-      const scan = await review(values.ai ?? snapshot(root).ai, scope, request);
+      const scan = await review(ai, scope, request);
+      ai = scan?.ai ?? ai;
       const ci = inspect(root, scope).ci;
       stages = (
         await multiple('规则在哪里生效？', [
@@ -282,8 +327,8 @@ async function main() {
     await propose(
       root,
       {
-        ai: values.ai,
-        model: selectedModel(values.ai ?? snapshot(root).ai),
+        ai,
+        model: selectedModel(ai, ai === startingAI),
         request,
         scope: values.scope ?? '.',
         stages: (stages || 'guide').split(',').map((s) => s.trim()),
@@ -390,11 +435,14 @@ async function main() {
       heading('项目设置', '选择工具  →  选择模型  →  检查项目  →  管理规则');
     const selected =
       read(root, manifest) === null ? undefined : snapshot(root).ai;
-    const ai = values.ai ?? (await chooseAgent(selected));
+    const initialAI = values.ai ?? (await chooseAgent(selected));
     const migrating =
       read(root, manifest) === null && read(root, legacyManifest) !== null;
-    const edits = init(root, ai, values.upgrade);
-    const scan = await review(ai, '.', '', { initial: true });
+    const initialEdits = init(root, initialAI, values.upgrade);
+    const scan = await review(initialAI, '.', '', { initial: true });
+    const ai = scan?.ai ?? initialAI;
+    const edits =
+      ai === initialAI ? initialEdits : init(root, ai, values.upgrade);
     if (scan?.model) edits.push(change(root, modelFile(ai), scan.model));
     if ((selected && selected !== ai) || migrating) {
       const personal = edits.find((e) => e.name === '@local/settings.json');
