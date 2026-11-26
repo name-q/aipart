@@ -9,6 +9,9 @@ import { rules } from '../lib/project.js';
 
 import {accept,drafts,propose,switchClient} from '../lib/session.js';
 
+import {installHook} from '../lib/hooks.js';
+import gate from '../lib/gate.cjs';
+
 const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
 async function question(label) {
   if (!tty) throw Error('此操作需要交互终端');
@@ -30,8 +33,10 @@ async function main() {
     ai:{type:'string'},yes:{type:'boolean'},upgrade:{type:'boolean'},help:{type:'boolean'},version:{type:'boolean'},json:{type:'boolean'},scope:{type:'string'},stages:{type:'string'},resume:{type:'string'},team:{type:'boolean'}
   }});
   if(values.version) return console.log('0.1.0');
-  if(!cmd || values.help) return console.log('aipart init --ai <codex|claude|pi|cursor> [--upgrade] [--yes]\naipart check [--json]\naipart ask [需求] [--scope 路径] [--stages guide,code,commit,ci] [--resume 编号]\naipart ai use <工具> [--team]\naipart accept <草案编号>\naipart enable|disable <规则编号> [阶段]\naipart recover');
+  if(!cmd || values.help) return console.log('aipart init --ai <codex|claude|pi|cursor> [--upgrade] [--yes]\naipart check [--json]\naipart ask [需求] [--scope 路径] [--stages guide,code,commit,ci] [--resume 编号]\naipart ai use <工具> [--team]\naipart accept <草案编号>\naipart enable|disable <规则编号> [阶段]\naipart hooks install\naipart lint <commit|ci>\naipart recover');
   const root=findRoot(process.cwd());
+  if(cmd==='hooks' && args[0]==='install') { snapshot(root); return installHook(root); }
+  if(cmd==='lint') { process.exitCode=await gate.check(root,args[0] ?? 'ci'); return; }
   if(cmd==='recover') return recover(root);
   if(cmd==='init') {
     const ai=values.ai ?? await question('选择工具 ('+agents.join('/')+')：');
