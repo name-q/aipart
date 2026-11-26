@@ -231,7 +231,10 @@ async function main() {
         return { ...result, ai };
       } catch (error) {
         if (!tty) throw error;
-        panel('连接未完成', [error.message]);
+        panel(
+          error.code === 'SCAN_FORMAT' ? '扫描结果无法读取' : '连接未完成',
+          [error.message],
+        );
         const action = await menu('接下来怎么做？', [
           ...(error.code === 'SCAN_TIMEOUT'
             ? [choice('switch', '换一个工具继续')]

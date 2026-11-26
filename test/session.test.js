@@ -210,3 +210,35 @@ test('Codex 返回完成事件后可以初始化，客户端进程无需先退�
   assert.match(result.stdout, /Codex \/ test/);
   assert.ok(fs.existsSync(path.join(cwd, '.aipart.sqlite')));
 });
+
+test('模型用按阶段分组的对象回复时保留非空的建议', (t) => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'aipart-pi-result-'));
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(cwd, 'pi'),
+    [
+      '#!/usr/bin/env node',
+      'if(process.argv[2]==="--version")return;',
+      'const result={summary:"前端项目",findings:[],recommend:{guide:["团队约定"],code:[],commit:false,ci:[]}};',
+      'console.log(JSON.stringify({type:"message_end",message:{role:"assistant",content:[{type:"text",text:JSON.stringify(result)}]}}));',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+  const client = new URL('../lib/client.js', import.meta.url).href;
+  const result = spawnSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      'const {assess}=await import(process.argv[1]); console.log(JSON.stringify(await assess(process.cwd(),"pi")));',
+      client,
+    ],
+    {
+      cwd,
+      encoding: 'utf8',
+      env: { ...process.env, PATH: cwd + path.delimiter + process.env.PATH },
+    },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).recommend, ['guide']);
+});
