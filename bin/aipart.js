@@ -9,6 +9,8 @@ import {
   heading,
   panel,
   progress,
+  stagesLabels,
+  ruleDetails,
 } from '../lib/ui.js';
 import { apply, change, json, read, recover } from '../lib/files.js';
 import {
@@ -41,12 +43,6 @@ const toolNames = {
   claude: 'Claude Code',
   pi: 'Pi',
   cursor: 'Cursor',
-};
-const stagesLabels = {
-  guide: '团队指引',
-  code: '编辑器和 ESLint',
-  commit: '提交前检查',
-  ci: 'CI 校验',
 };
 function changedFiles(edits) {
   return [
@@ -226,70 +222,74 @@ async function main() {
         choice('quit', '退出'),
       ]);
       if (action === 'quit') return;
-      if (action === 'add') await ask('');
-      if (action === 'switch') await select(await chooseAgent(state.ai));
-      if (action === 'draft') {
-        const list = drafts(root);
-        if (!list.length) panel('草案', ['暂无草案']);
-        else {
-          const resume = await menu('选择草案', [
-            ...list.map((id) => choice(id, id)),
-            choice('', '返回'),
-          ]);
-          if (resume) await propose(root, { resume }, question, confirm);
+      try {
+        if (action === 'add') await ask('');
+        if (action === 'switch') await select(await chooseAgent(state.ai));
+        if (action === 'draft') {
+          const list = drafts(root);
+          if (!list.length) panel('草案', ['暂无草案']);
+          else {
+            const resume = await menu('选择草案', [
+              ...list.map((id) => choice(id, id)),
+              choice('', '返回'),
+            ]);
+            if (resume) await propose(root, { resume }, question, confirm);
+          }
         }
-      }
-      if (action === 'view' || action === 'toggle') {
-        const id = await menu('选择规则', [
-          ...state.rules.map((r) =>
-            choice(r.id, (r.enabled ? '●  ' : '○  ') + r.title, r.scope),
-          ),
-          choice('', '返回'),
-        ]);
-        if (!id) continue;
-        const rule = state.rules.find((r) => r.id === id);
-        if (action === 'view') {
-          panel(rule.title, [
-            rule.decision,
-            ...(rule.exceptions ? ['例外 · ' + rule.exceptions] : []),
-            '范围 · ' + rule.scope,
-            ...Object.entries(rule.stages).map(
-              ([key, level]) =>
-                stagesLabels[key] +
-                ' · ' +
-                ({ warn: '提醒', error: '阻断' }[level] ?? '已停用'),
-            ),
-          ]);
-          await menu('规则详情', [choice('back', '返回控制台')]);
-        } else {
-          const stage = await menu('选择执行阶段', [
-            choice('all', '整条规则'),
-            ...Object.keys(rule.stages).map((key) =>
-              choice(key, stagesLabels[key]),
+        if (action === 'view' || action === 'toggle') {
+          const id = await menu('选择规则', [
+            ...state.rules.map((r) =>
+              choice(r.id, (r.enabled ? '●  ' : '○  ') + r.title, r.scope),
             ),
             choice('', '返回'),
           ]);
-          if (!stage) continue;
-          const key = stage === 'all' ? undefined : stage;
-          const next = toggle(
-            rule,
-            key,
-            !(key ? rule.stages[key] : rule.enabled),
-          );
-          if (await confirm()) apply(root, updateRule(root, next, rule));
+          if (!id) continue;
+          const rule = state.rules.find((r) => r.id === id);
+          if (action === 'view') {
+            panel(rule.title, ruleDetails(rule));
+            await menu('规则详情', [choice('back', '返回控制台')]);
+          } else {
+            const stage = await menu('选择执行阶段', [
+              choice('all', '整条规则'),
+              ...Object.keys(rule.stages).map((key) =>
+                choice(key, stagesLabels[key]),
+              ),
+              choice('', '返回'),
+            ]);
+            if (!stage) continue;
+            const key = stage === 'all' ? undefined : stage;
+            const next = toggle(
+              rule,
+              key,
+              !(key ? rule.stages[key] : rule.enabled),
+            );
+            if (await confirm()) apply(root, updateRule(root, next, rule));
+          }
         }
+      } catch (error) {
+        if (
+          error.name === 'ExitPromptError' ||
+          error.name === 'AbortPromptError'
+        )
+          throw error;
+        panel('操作未完成', [error.message]);
       }
     }
   };
   if (cmd === 'init') {
     if (tty) heading('项目设置', '选择工具  →  检查项目  →  管理规则');
-    const ai = values.ai ?? (await chooseAgent());
+    const selected =
+      read(root, manifest) === null ? undefined : snapshot(root).ai;
+    const ai = values.ai ?? (await chooseAgent(selected));
     const migrating =
       read(root, manifest) === null && read(root, legacyManifest) !== null;
     const edits = init(root, ai, values.upgrade);
     await review(ai, '.', '');
-    if (read(root, manifest) !== null && snapshot(root).ai !== ai)
-      edits.push(change(root, '@local/settings.json', json({ ai })));
+    if ((selected && selected !== ai) || migrating) {
+      const personal = edits.find((e) => e.name === '@local/settings.json');
+      if (personal) personal.after = json({ ai });
+      else edits.push(change(root, '@local/settings.json', json({ ai })));
+    }
     const env = inspect(root);
     console.log(
       '工程配置：' +
@@ -312,13 +312,18 @@ async function main() {
           }
         }
         if (read(root, '.aipart/gate.cjs') !== null)
-          panel('旧检查器仍在使用', [
-            '处理已有调用后，可移除原检查器。CI 调用方式为 aipart lint ci。',
+          panel('保留了旧目录中的自定义文件', [
+            '请检查 .aipart/gate.cjs 的调用并按需清理。',
           ]);
       }
     }
     if (tty) return dashboard();
-    console.log('项目配置就绪');
+    const state = snapshot(root);
+    panel('项目检查', [
+      state.rules.filter((rule) => rule.enabled).length + ' 条规则启用',
+      ...state.issues,
+    ]);
+    if (state.issues.length) process.exitCode = 1;
     return;
   }
   if (cmd === 'ask') return ask(args.join(' '));
