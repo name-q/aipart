@@ -48,6 +48,7 @@ import {
   hasCredential,
 } from '../lib/api-client.js';
 import { signInWithChatGPT } from '../lib/chatgpt-auth.js';
+import { configureClaude, useLocalClaude } from '../lib/claude-connection.js';
 const toolNames = {
   openai: 'OpenAI',
   claude: 'Claude Code',
@@ -74,7 +75,7 @@ function chooseAgent(selected) {
           ? name === 'openai'
             ? '使用 ChatGPT 登录或 OpenAI API Key'
             : '使用 ' + apiKeyName(name) + ' 直接访问服务'
-          : '沿用本机已登录的客户端',
+          : '支持官方 Key、第三方地址或本机 Claude Code 设置',
       ),
     ),
     selected,
@@ -142,11 +143,50 @@ async function main() {
           '输入 ' + toolNames[ai] + ' API Key（仅用于本次运行）',
         );
         useApiKey(ai, key);
-      } else signIn(root, ai);
+      } else {
+        signIn(root, ai);
+        useLocalClaude();
+      }
     } catch (error) {
       if (error.name === 'ExitPromptError' || error.name === 'AbortPromptError')
         throw error;
       panel('认证未完成', [error.message]);
+    }
+  };
+  const chooseClaudeConnection = async () => {
+    for (;;) {
+      const mode = await menu('Claude Code 连接方式', [
+        choice('local', '沿用本机 Claude Code 设置'),
+        choice('official', 'Anthropic 官方 API Key'),
+        choice('gateway', '第三方服务 URL + Key'),
+      ]);
+      if (mode === 'local') {
+        useLocalClaude();
+        return;
+      }
+      try {
+        const base =
+          mode === 'gateway'
+            ? (await question('Claude 兼容服务的 URL')).trim()
+            : undefined;
+        const header =
+          mode === 'gateway'
+            ? await menu('第三方服务的认证方式', [
+                choice('bearer', 'Bearer Token', 'Authorization: Bearer'),
+                choice('api-key', 'API Key', 'x-api-key'),
+              ])
+            : 'api-key';
+        const key = await secret('输入 Claude API Key（仅用于本次运行）');
+        configureClaude({ base, key, header });
+        return;
+      } catch (error) {
+        if (
+          error.name === 'ExitPromptError' ||
+          error.name === 'AbortPromptError'
+        )
+          throw error;
+        panel('Claude Code 配置未完成', [error.message]);
+      }
     }
   };
   const chatgptLogin = async (newAccount = false) => {
@@ -187,6 +227,9 @@ async function main() {
         ...(ai === 'openai' && !models.length
           ? [choice('chatgpt', '使用 ChatGPT 登录')]
           : []),
+        ...(ai === 'claude' && !models.length
+          ? [choice('claude-connection', '配置 Claude Code 连接')]
+          : []),
         ...models.map((m) =>
           choice(
             'model=' + m.id,
@@ -212,6 +255,9 @@ async function main() {
         ...(ai === 'openai' && models.length
           ? [choice('login', '改用 OpenAI API Key')]
           : []),
+        ...(ai === 'claude' && models.length
+          ? [choice('claude-connection', '更改 Claude Code 连接')]
+          : []),
         ...(models.length ? [choice('refresh', '重新读取模型')] : []),
         choice('manual', '手动输入模型 ID'),
         ...(initial
@@ -236,6 +282,11 @@ async function main() {
         current = undefined;
         continue;
       }
+      if (selection === 'claude-connection') {
+        await chooseClaudeConnection();
+        current = undefined;
+        continue;
+      }
       if (selection === 'login') {
         await login(ai);
         continue;
@@ -249,6 +300,7 @@ async function main() {
   };
   const review = async (ai, scope, request, { initial = false } = {}) => {
     if (values.offline) return null;
+    if (initial && tty && ai === 'claude') await chooseClaudeConnection();
     let model = selectedModel(ai);
     if (initial && tty && !values.model) {
       const selection = await chooseModel(ai, model, { initial: true });
@@ -283,6 +335,9 @@ async function main() {
             : []),
           ...(ai === 'openai' && error.code === 'AUTH_REQUIRED'
             ? [choice('chatgpt', '使用 ChatGPT 登录')]
+            : []),
+          ...(ai === 'claude'
+            ? [choice('claude-connection', '更改 Claude Code 连接')]
             : []),
           choice('model', '选择其他模型'),
           ...(error.code === 'SCAN_TIMEOUT'
@@ -319,6 +374,11 @@ async function main() {
         }
         if (action === 'chatgpt') {
           await chatgptLogin();
+          const next = await chooseModel(ai, undefined);
+          if (next.model) model = next.model;
+        }
+        if (action === 'claude-connection') {
+          await chooseClaudeConnection();
           const next = await chooseModel(ai, undefined);
           if (next.model) model = next.model;
         }
