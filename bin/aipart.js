@@ -11,15 +11,29 @@ import {
   progress,
 } from '../lib/ui.js';
 import { apply, change, json, read, recover } from '../lib/files.js';
-import { agents, findRoot, init, manifest, rules } from '../lib/project.js';
+import {
+  agents,
+  findRoot,
+  init,
+  manifest,
+  legacyManifest,
+  rules,
+} from '../lib/project.js';
 
-import { snapshot, updateRule, stageNames } from '../lib/rules.js';
+import {
+  snapshot,
+  updateRule,
+  stageNames,
+  validateScope,
+} from '../lib/rules.js';
 
 import { accept, drafts, propose, switchClient } from '../lib/session.js';
 
 import { installHook } from '../lib/hooks.js';
-import gate from '../lib/gate.cjs';
+import { check as lint } from '../lib/gate.js';
 
+import { databaseName, dataPrefix, localPrefix } from '../lib/storage.js';
+import { pruneLegacy } from '../lib/migrate.js';
 import { assess } from '../lib/client.js';
 import { inspect } from '../lib/inspect.js';
 const toolNames = {
@@ -34,6 +48,15 @@ const stagesLabels = {
   commit: '提交前检查',
   ci: 'CI 校验',
 };
+function changedFiles(edits) {
+  return [
+    ...new Set(
+      edits
+        .filter((e) => e.before !== e.after && !e.name.startsWith(localPrefix))
+        .map((e) => (e.name.startsWith(dataPrefix) ? databaseName : e.name)),
+    ),
+  ];
+}
 const choice = (value, name, description) => ({ value, name, description });
 function chooseAgent(selected) {
   return menu(
@@ -92,7 +115,7 @@ async function main() {
     return installHook(root);
   }
   if (cmd === 'lint') {
-    process.exitCode = await gate.check(root, args[0] ?? 'ci');
+    process.exitCode = await lint(root, args[0] ?? 'ci');
     return;
   }
   if (cmd === 'recover') return recover(root);
@@ -133,7 +156,7 @@ async function main() {
     if (tty && !request && !values.resume)
       request = await question('希望项目遵循哪条规则？');
     if (!stages && tty && !values.resume) {
-      const scope = values.scope ?? '.';
+      const scope = validateScope(root, values.scope ?? '.');
       const scan = await review(values.ai ?? snapshot(root).ai, scope, request);
       const ci = inspect(root, scope).ci;
       stages = (
@@ -176,12 +199,8 @@ async function main() {
   };
   const select = async (name) => {
     const edits = switchClient(root, name, values.team);
-    console.log(
-      edits
-        .filter((e) => e.before !== e.after)
-        .map((e) => e.name)
-        .join('\n'),
-    );
+    const files = changedFiles(edits);
+    panel('切换工具', [toolNames[name], ...files]);
     if (!tty || (await confirm())) apply(root, edits);
   };
   const dashboard = async () => {
@@ -265,10 +284,12 @@ async function main() {
   if (cmd === 'init') {
     if (tty) heading('项目设置', '选择工具  →  检查项目  →  管理规则');
     const ai = values.ai ?? (await chooseAgent());
+    const migrating =
+      read(root, manifest) === null && read(root, legacyManifest) !== null;
     const edits = init(root, ai, values.upgrade);
     await review(ai, '.', '');
     if (read(root, manifest) !== null && snapshot(root).ai !== ai)
-      edits.push(change(root, '.aipart/local/settings.json', json({ ai })));
+      edits.push(change(root, '@local/settings.json', json({ ai })));
     const env = inspect(root);
     console.log(
       '工程配置：' +
@@ -276,11 +297,25 @@ async function main() {
           ' ',
         ) || '未发现'),
     );
-    const files = edits.filter((c) => c.before !== c.after).map((c) => c.name);
-    if (files.length) {
-      panel('将写入', files);
+    const files = changedFiles(edits);
+    if (edits.some((e) => e.before !== e.after)) {
+      panel('将写入', files.length ? files : ['本机工具选择']);
       if (!tty || (await confirm())) apply(root, edits);
       else return;
+      if (migrating) {
+        pruneLegacy(root);
+        if (rules(root).some((r) => r.bindings?.commit?.rule)) {
+          try {
+            installHook(root);
+          } catch (error) {
+            console.error(error.message);
+          }
+        }
+        if (read(root, '.aipart/gate.cjs') !== null)
+          panel('旧检查器仍在使用', [
+            '处理已有调用后，可移除原检查器。CI 调用方式为 aipart lint ci。',
+          ]);
+      }
     }
     if (tty) return dashboard();
     console.log('项目配置就绪');
@@ -291,8 +326,11 @@ async function main() {
   if (cmd === 'ai' && args[0] === 'use') return select(args[1]);
   if (cmd === 'check') {
     if (read(root, manifest) === null) {
-      const status =
-        read(root, 'AGENTS.md') === null ? '未接入' : '已有项目指引，尚未接入';
+      const status = read(root, legacyManifest)
+        ? '检测到旧版配置'
+        : read(root, 'AGENTS.md') === null
+          ? '未接入'
+          : '已有项目指引，尚未接入';
       console.log(
         values.json
           ? JSON.stringify({ initialized: false, status })

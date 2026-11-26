@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { apply, change, json, read, recover } from '../lib/files.js';
+import { apply, change, json, read, recover, target } from '../lib/files.js';
 import { init } from '../lib/project.js';
 import { makeRule, snapshot, updateRule } from '../lib/rules.js';
 
@@ -63,7 +63,7 @@ test('过期预览拒绝覆盖新修改，中断的写入可以恢复', (t) => {
   fs.writeFileSync(path.join(root, 'one.txt'), 'B');
   assert.throws(() => apply(root, [edit]), /变化/);
   fs.writeFileSync(
-    path.join(root, '.aipart/local/transaction.json'),
+    target(root, '@local/transaction.json'),
     json([{ name: 'one.txt', before: '原文', after: 'B' }]),
   );
   recover(root);
@@ -87,5 +87,50 @@ test('业务样例验证失败时恢复待审草案和旧配置', (t) => {
   );
   assert.equal(read(root, 'pending.json'), '等待确认');
   assert.equal(read(root, 'eslint.config.js'), null);
-  assert.equal(read(root, '.aipart/local/transaction.json'), null);
+  assert.equal(read(root, '@local/transaction.json'), null);
+});
+
+test('迁移旧规则和草案到单库与个人目录，保留手工指引', async (t) => {
+  const root = fixture(t);
+  const { baseline, project, rules } = await import('../lib/project.js');
+  const { pruneLegacy } = await import('../lib/migrate.js');
+  const oldBody = '旧指引';
+  const draft = '3fc096f8-6894-4aa7-b23a-8f0330b26713';
+  fs.mkdirSync(path.join(root, '.aipart/rules'), { recursive: true });
+  fs.mkdirSync(path.join(root, '.aipart/local/drafts'), { recursive: true });
+  fs.writeFileSync(
+    path.join(root, 'AGENTS.md'),
+    '团队说明\n<!-- aipart:rules -->\n' +
+      oldBody +
+      '\n<!-- /aipart:rules -->\n',
+  );
+  fs.writeFileSync(
+    path.join(root, '.aipart/project.json'),
+    json({
+      format: 1,
+      template: 2,
+      defaultAI: 'codex',
+      agents: ['codex'],
+      body: oldBody,
+    }),
+  );
+  fs.writeFileSync(
+    path.join(root, '.aipart/rules/reuse.json'),
+    json({ ...baseline, enabled: false }),
+  );
+  fs.writeFileSync(
+    path.join(root, '.aipart/local/drafts', draft + '.session.json'),
+    json({ stages: ['guide'], scope: '.' }),
+  );
+  fs.writeFileSync(path.join(root, '.aipart/.gitignore'), '/local/\n');
+  apply(root, init(root, 'pi'));
+  pruneLegacy(root);
+  assert.deepEqual(fs.readdirSync(root).sort(), [
+    '.aipart.sqlite',
+    'AGENTS.md',
+  ]);
+  assert.equal(project(root).defaultAI, 'codex');
+  assert.equal(rules(root)[0].enabled, false);
+  assert.ok(read(root, '@local/drafts/' + draft + '.session.json'));
+  assert.match(read(root, 'AGENTS.md'), /^团队说明/);
 });

@@ -10,6 +10,7 @@ import { init } from '../lib/project.js';
 import { makeRule, updateRule } from '../lib/rules.js';
 import { hookStatus, installHook } from '../lib/hooks.js';
 
+const cli = fileURLToPath(new URL('../bin/aipart.js', import.meta.url));
 const modules = fileURLToPath(new URL('../node_modules', import.meta.url));
 test('提交按暂存内容校验，保留旧钩子和未暂存修改', (t) => {
   const root = fs.realpathSync(
@@ -56,7 +57,7 @@ test('提交按暂存内容校验，保留旧钩子和未暂存修改', (t) => {
   put('with space.js', 'debugger;');
   result = runHook();
   assert.equal(result.status, 17, result.stderr);
-  const ci = spawnSync(process.execPath, ['.aipart/gate.cjs', 'ci'], {
+  const ci = spawnSync(process.execPath, [cli, 'lint', 'ci'], {
     cwd: root,
     encoding: 'utf8',
   });

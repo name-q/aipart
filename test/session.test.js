@@ -6,6 +6,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
+import { target } from '../lib/files.js';
+
 const cli = fileURLToPath(new URL('../bin/aipart.js', import.meta.url));
 test('更换工具后复用本地草案，确认后跨工具读取同一规则', (t) => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'aipart-cli-'));
@@ -38,7 +40,7 @@ test('更换工具后复用本地草案，确认后跨工具读取同一规则',
     suggestion: '保留例外',
   };
   fs.writeFileSync(
-    path.join(cwd, '.aipart/local/drafts', id + '.json'),
+    target(cwd, '@local/drafts/' + id + '.json'),
     JSON.stringify(payload),
   );
   call('accept', id, '--yes');
@@ -96,10 +98,10 @@ test('原生会话按项目启动并限定业务目录，离线验证草案的�
     [
       '#!/usr/bin/env node',
       'if(process.argv[2]==="--version")process.exit(0);',
-      'const p=process.argv[2];',
+      'const p=process.argv.at(-1);',
       'if(process.cwd()!==' +
         JSON.stringify(cwd) +
-        ' || process.argv.length!==3)process.exit(3);',
+        ' || process.argv.length!==4)process.exit(3);',
       'const file=p.split("\\n").find(l=>l.startsWith("草案绝对路径：")).slice("草案绝对路径：".length);',
       'require("node:fs").writeFileSync(file,' +
         JSON.stringify(JSON.stringify(draft)) +

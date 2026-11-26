@@ -7,7 +7,7 @@
     "aipart": "bin/aipart.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.13"
   },
   "files": [
     "bin",
