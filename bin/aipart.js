@@ -98,12 +98,13 @@ async function main() {
       resume: { type: 'string' },
       team: { type: 'boolean' },
       offline: { type: 'boolean' },
+      model: { type: 'string' },
     },
   });
   if (values.version) return console.log('0.1.0');
   if (!cmd || values.help)
     return console.log(
-      'aipart init --ai <codex|claude|pi|cursor> [--upgrade] [--offline] [--yes]\naipart check [--json]\naipart ask [需求] [--scope 路径] [--stages guide,code,commit,ci] [--resume 编号]\naipart ai use <工具> [--team]\naipart accept <草案编号>\naipart enable|disable <规则编号> [阶段]\naipart hooks install\naipart lint <commit|ci>\naipart recover',
+      'aipart init --ai <codex|claude|pi|cursor> [--upgrade] [--model 模型] [--offline] [--yes]\naipart check [--json]\naipart ask [需求] [--scope 路径] [--stages guide,code,commit,ci] [--resume 编号]\naipart ai use <工具> [--team]\naipart accept <草案编号>\naipart enable|disable <规则编号> [阶段]\naipart hooks install\naipart lint <commit|ci>\naipart recover',
     );
   const root = findRoot(process.cwd());
   if (cmd === 'hooks' && args[0] === 'install') {
@@ -126,7 +127,7 @@ async function main() {
       try {
         const result = await progress(
           '连接 ' + toolNames[ai] + ' 并读取项目',
-          () => assess(root, ai, { scope, request }),
+          () => assess(root, ai, { scope, request, model: values.model }),
         );
         panel('扫描完成 · ' + toolNames[ai], [
           result.summary,
@@ -184,6 +185,7 @@ async function main() {
       root,
       {
         ai: values.ai,
+        model: values.model,
         request,
         scope: values.scope ?? '.',
         stages: (stages || 'guide').split(',').map((s) => s.trim()),
@@ -233,7 +235,13 @@ async function main() {
               ...list.map((id) => choice(id, id)),
               choice('', '返回'),
             ]);
-            if (resume) await propose(root, { resume }, question, confirm);
+            if (resume)
+              await propose(
+                root,
+                { resume, model: values.model },
+                question,
+                confirm,
+              );
           }
         }
         if (action === 'view' || action === 'toggle') {
