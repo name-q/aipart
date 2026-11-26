@@ -36,7 +36,7 @@ import { check as lint } from '../lib/gate.js';
 
 import { databaseName, dataPrefix, localPrefix } from '../lib/storage.js';
 import { pruneLegacy } from '../lib/migrate.js';
-import { assess } from '../lib/client.js';
+import { codexModels, connect, signIn } from '../lib/client.js';
 import { inspect } from '../lib/inspect.js';
 const toolNames = {
   codex: 'Codex',
@@ -117,27 +117,47 @@ async function main() {
   }
   if (cmd === 'recover') return recover(root);
   const confirm = () => values.yes || approve('保存以上改动？');
+  const sessionModels = new Map();
+  const modelFile = (ai) => '@local/model-' + ai + '.txt';
+  const selectedModel = (ai) =>
+    values.model ??
+    sessionModels.get(ai) ??
+    read(root, modelFile(ai)) ??
+    undefined;
   const review = async (ai, scope, request) => {
     if (values.offline) return null;
     if (ai === 'cursor') {
       if (tty) panel('Cursor IDE', ['规则和草案可在 IDE 中继续']);
       return null;
     }
+    let model = selectedModel(ai);
     for (;;) {
       try {
         const result = await progress(
           '连接 ' + toolNames[ai] + ' 并读取项目',
-          () => assess(root, ai, { scope, request, model: values.model }),
+          () => connect(root, ai, { scope, request, model }),
         );
-        panel('扫描完成 · ' + toolNames[ai], [
-          result.summary,
-          ...result.findings,
-        ]);
+        if (result.model) sessionModels.set(ai, result.model);
+        panel(
+          '扫描完成 · ' +
+            toolNames[ai] +
+            (result.model ? ' / ' + result.model : ''),
+          [result.summary, ...result.findings],
+        );
         return result;
       } catch (error) {
         if (!tty) throw error;
         panel('连接未完成', [error.message]);
         const action = await menu('接下来怎么做？', [
+          ...(ai === 'codex'
+            ? [
+                choice('model', '选择账号可用的模型'),
+                choice('login', '在浏览器登录 ChatGPT', '登录完成后会重新连接'),
+                choice('device', '使用设备码登录', '适用于远程终端'),
+              ]
+            : ai === 'pi'
+              ? [choice('login', '在 Pi 中登录或切换模型')]
+              : []),
           choice('retry', '重试连接'),
           choice('offline', '仅用本地检查'),
           choice('cancel', '取消'),
@@ -145,6 +165,34 @@ async function main() {
         if (action === 'offline') return null;
         if (action === 'cancel')
           throw Object.assign(Error('已取消'), { name: 'ExitPromptError' });
+        if (action === 'model') {
+          const models = await progress('读取 Codex 模型目录', () =>
+            codexModels(root),
+          );
+          const next = await menu(
+            '选择模型',
+            [
+              ...models.map((m) => choice(m.id, m.label, m.id)),
+              choice('manual', '手动输入模型 ID'),
+              choice('', '返回连接菜单'),
+            ],
+            model,
+          );
+          if (next)
+            model = next === 'manual' ? await question('输入模型 ID') : next;
+        }
+        if (action === 'login' || action === 'device') {
+          if (ai === 'pi')
+            panel('Pi 登录', [
+              '在 Pi 输入 /login 并选择服务商。登录后可用 /model 选模型，退出 Pi 后继续。',
+            ]);
+          try {
+            signIn(root, ai, action === 'device');
+          } catch (error) {
+            panel('登录未完成', [error.message]);
+          }
+          model = undefined;
+        }
       }
     }
   };
@@ -185,7 +233,7 @@ async function main() {
       root,
       {
         ai: values.ai,
-        model: values.model,
+        model: selectedModel(values.ai ?? snapshot(root).ai),
         request,
         scope: values.scope ?? '.',
         stages: (stages || 'guide').split(',').map((s) => s.trim()),
@@ -238,7 +286,10 @@ async function main() {
             if (resume)
               await propose(
                 root,
-                { resume, model: values.model },
+                {
+                  resume,
+                  model: selectedModel(state.ai),
+                },
                 question,
                 confirm,
               );
@@ -292,7 +343,8 @@ async function main() {
     const migrating =
       read(root, manifest) === null && read(root, legacyManifest) !== null;
     const edits = init(root, ai, values.upgrade);
-    await review(ai, '.', '');
+    const scan = await review(ai, '.', '');
+    if (scan?.model) edits.push(change(root, modelFile(ai), scan.model));
     if ((selected && selected !== ai) || migrating) {
       const personal = edits.find((e) => e.name === '@local/settings.json');
       if (personal) personal.after = json({ ai });
@@ -307,7 +359,7 @@ async function main() {
     );
     const files = changedFiles(edits);
     if (edits.some((e) => e.before !== e.after)) {
-      panel('将写入', files.length ? files : ['本机工具选择']);
+      panel('将写入', files.length ? files : ['本机连接设置']);
       if (!tty || (await confirm())) apply(root, edits);
       else return;
       if (migrating) {

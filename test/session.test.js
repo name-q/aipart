@@ -134,3 +134,43 @@ test('原生会话按项目启动并限定业务目录，离线验证草案的�
   run('disable', rule.id, 'code');
   assert.match(fs.readFileSync(path.join(cwd, file), 'utf8'), /rules:\{\}/);
 });
+
+test('Codex 默认模型被拒绝后使用账号目录中的可选模型', (t) => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'aipart-codex-'));
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  const code = [
+    '#!/usr/bin/env node',
+    'const argv=process.argv.slice(2);',
+    'const write=(event)=>console.log(JSON.stringify(event));',
+    'if(argv[0]==="--version")return;',
+    'if(argv[0]==="debug"){write({models:[{slug:"hidden",visibility:"hide"},{slug:"available",visibility:"list",display_name:"Available"}]});return;}',
+    'if(argv[0]!=="exec")process.exit(3);',
+    'if(argv[argv.indexOf("--model")+1]!=="available"){write({type:"turn.failed",error:{message:"model_not_found"}});process.exitCode=1;return;}',
+    'write({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({summary:"测试项目",findings:[],recommend:["guide"]})}});',
+  ].join('\n');
+  fs.writeFileSync(path.join(cwd, 'codex'), code, { mode: 0o755 });
+  const run = spawnSync(
+    process.execPath,
+    [cli, 'init', '--ai', 'codex', '--yes'],
+    {
+      cwd,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: cwd + path.delimiter + process.env.PATH,
+        AIPART_HOME: path.join(cwd, 'private'),
+      },
+    },
+  );
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /Codex \/ available/);
+  assert.ok(fs.existsSync(path.join(cwd, '.aipart.sqlite')));
+  const localDir = fs.readdirSync(path.join(cwd, 'private/projects'))[0];
+  assert.equal(
+    fs.readFileSync(
+      path.join(cwd, 'private/projects', localDir, 'model-codex.txt'),
+      'utf8',
+    ),
+    'available',
+  );
+});
