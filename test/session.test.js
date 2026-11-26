@@ -174,3 +174,39 @@ test('Codex 默认模型被拒绝后使用账号目录中的可选模型', (t) =
     'available',
   );
 });
+
+test('Codex 返回完成事件后可以初始化，客户端进程无需先退出', (t) => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'aipart-codex-settled-'));
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(cwd, 'codex'),
+    [
+      '#!/usr/bin/env node',
+      'if(process.argv[2]==="--version")return;',
+      'const write=o=>process.stdout.write(JSON.stringify(o)+"\\n");',
+      'write({type:"turn.started"});',
+      'write({type:"item.completed",item:{type:"agent_message",text:"正在检查"}});',
+      'write({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({summary:"扫描完成",findings:[],recommend:["guide"]})}});',
+      'write({type:"turn.completed"});',
+      'setInterval(()=>{},1000);',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+  const result = spawnSync(
+    process.execPath,
+    [cli, 'init', '--ai', 'codex', '--model', 'test', '--yes'],
+    {
+      cwd,
+      encoding: 'utf8',
+      timeout: 8000,
+      env: {
+        ...process.env,
+        PATH: cwd + path.delimiter + process.env.PATH,
+        AIPART_HOME: path.join(cwd, 'private'),
+      },
+    },
+  );
+  assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+  assert.match(result.stdout, /Codex \/ test/);
+  assert.ok(fs.existsSync(path.join(cwd, '.aipart.sqlite')));
+});
