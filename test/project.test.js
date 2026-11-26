@@ -69,3 +69,23 @@ test('过期预览拒绝覆盖新修改，中断的写入可以恢复', (t) => {
   recover(root);
   assert.equal(read(root, 'one.txt'), '原文');
 });
+
+test('业务样例验证失败时恢复待审草案和旧配置', (t) => {
+  const root = fixture(t);
+  apply(root, init(root, 'pi'));
+  fs.writeFileSync(path.join(root, 'pending.json'), '等待确认');
+  const edits = [
+    change(root, 'pending.json', null),
+    change(root, 'eslint.config.js', 'export default [];'),
+  ];
+  assert.throws(
+    () =>
+      apply(root, edits, () => {
+        throw Error('反例未命中');
+      }),
+    /反例未命中/,
+  );
+  assert.equal(read(root, 'pending.json'), '等待确认');
+  assert.equal(read(root, 'eslint.config.js'), null);
+  assert.equal(read(root, '.aipart/local/transaction.json'), null);
+});
