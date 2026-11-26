@@ -48,7 +48,8 @@ import {
   hasCredential,
 } from '../lib/api-client.js';
 import { signInWithChatGPT } from '../lib/chatgpt-auth.js';
-import { configureClaude, useLocalClaude } from '../lib/claude-connection.js';
+import { configureClaude, claudeCredential } from '../lib/claude-connection.js';
+import { credentialSession } from '../lib/credential-session.js';
 const toolNames = {
   openai: 'OpenAI',
   claude: 'Claude Code',
@@ -119,6 +120,7 @@ async function main() {
       'aipart init --ai <openai|claude|deepseek> [--upgrade] [--model 模型] [--offline] [--yes]\naipart check [--json]\naipart ask [需求] [--scope 路径] [--stages guide,code,commit,ci] [--resume 编号]\naipart ai use <工具> [--team]\naipart accept <草案编号>\naipart enable|disable <规则编号> [阶段]\naipart hooks install\naipart lint <commit|ci>\naipart recover',
     );
   const root = findRoot(process.cwd());
+  const credentials = credentialSession(root);
   if (cmd === 'hooks' && args[0] === 'install') {
     snapshot(root);
     return installHook(root);
@@ -139,13 +141,12 @@ async function main() {
   const login = async (ai) => {
     try {
       if (isApiClient(ai)) {
-        const key = await secret(
-          '输入 ' + toolNames[ai] + ' API Key（仅用于本次运行）',
-        );
+        const key = await secret('输入 ' + toolNames[ai] + ' API Key');
         useApiKey(ai, key);
+        credentials.changed(ai);
       } else {
         signIn(root, ai);
-        useLocalClaude();
+        credentials.localClaude();
       }
     } catch (error) {
       if (error.name === 'ExitPromptError' || error.name === 'AbortPromptError')
@@ -156,12 +157,16 @@ async function main() {
   const chooseClaudeConnection = async () => {
     for (;;) {
       const mode = await menu('Claude Code 连接方式', [
+        ...(claudeCredential()
+          ? [choice('current', '继续使用已保存的连接')]
+          : []),
         choice('local', '沿用本机 Claude Code 设置'),
         choice('official', 'Anthropic 官方 API Key'),
         choice('gateway', '第三方服务 URL + Key'),
       ]);
+      if (mode === 'current') return;
       if (mode === 'local') {
-        useLocalClaude();
+        credentials.localClaude();
         return;
       }
       try {
@@ -176,8 +181,9 @@ async function main() {
                 choice('api-key', 'API Key', 'x-api-key'),
               ])
             : 'api-key';
-        const key = await secret('输入 Claude API Key（仅用于本次运行）');
+        const key = await secret('输入 Claude API Key');
         configureClaude({ base, key, header });
+        credentials.changed('claude');
         return;
       } catch (error) {
         if (
@@ -202,6 +208,8 @@ async function main() {
           },
         }),
       );
+      credentials.changed('openai');
+      credentials.verified('openai');
       panel('ChatGPT 已连接', ['正在从 OpenAI 读取此账号的模型列表。']);
     } catch (error) {
       panel('ChatGPT 登录未完成', [error.message]);
@@ -213,8 +221,9 @@ async function main() {
       let catalogError;
       try {
         models = await progress('读取 ' + toolNames[ai] + ' 的模型列表', () =>
-          modelCatalog(root, ai),
+          credentials.run(ai, () => modelCatalog(root, ai)),
         );
+        if (models.length) credentials.verified(ai);
       } catch (error) {
         catalogError = error;
       }
@@ -300,6 +309,7 @@ async function main() {
   };
   const review = async (ai, scope, request, { initial = false } = {}) => {
     if (values.offline) return null;
+    credentials.restore(ai);
     if (initial && tty && ai === 'claude') await chooseClaudeConnection();
     let model = selectedModel(ai);
     if (initial && tty && !values.model) {
@@ -313,8 +323,12 @@ async function main() {
       try {
         const result = await progress(
           '连接 ' + toolNames[ai] + ' 并读取项目',
-          () => connect(root, ai, { scope, request, model }),
+          () =>
+            credentials.run(ai, () =>
+              connect(root, ai, { scope, request, model }),
+            ),
         );
+        credentials.verified(ai);
         if (result.model) sessionModels.set(ai, result.model);
         panel(
           '扫描完成 · ' +
@@ -333,7 +347,8 @@ async function main() {
           ...(error.code === 'SCAN_TIMEOUT'
             ? [choice('switch', '换一个工具继续')]
             : []),
-          ...(ai === 'openai' && error.code === 'AUTH_REQUIRED'
+          ...(ai === 'openai' &&
+          ['AUTH_REQUIRED', 'AUTH_INVALID'].includes(error.code)
             ? [choice('chatgpt', '使用 ChatGPT 登录')]
             : []),
           ...(ai === 'claude'
@@ -394,6 +409,29 @@ async function main() {
       }
     }
   };
+  const prepareAsk = async (ai) => {
+    credentials.restore(ai);
+    if (ai === 'claude' && claudeCredential() && !credentials.isVerified(ai)) {
+      try {
+        await credentials.run(ai, () => modelCatalog(root, ai));
+        credentials.verified(ai);
+      } catch (error) {
+        if (error.code === 'AUTH_INVALID') throw error;
+      }
+    }
+    if (tty && isApiClient(ai) && !hasCredential(ai)) {
+      const selection = await chooseModel(ai, selectedModel(ai));
+      if (!selection.model) return false;
+      sessionModels.set(ai, selection.model);
+    }
+    return true;
+  };
+  const makeProposal = async (ai, options, acceptDraft) => {
+    await credentials.run(ai, () =>
+      propose(root, { ...options, ai }, question, acceptDraft),
+    );
+    credentials.verified(ai);
+  };
   const ask = async (request) => {
     const startingAI = values.ai ?? snapshot(root).ai;
     if (!startingAI) throw Error('请运行 aipart init 重新选择工具。');
@@ -431,22 +469,16 @@ async function main() {
         ])
       ).join(',');
     }
-    if (tty && isApiClient(ai) && !hasCredential(ai)) {
-      const selection = await chooseModel(ai, selectedModel(ai));
-      if (!selection.model) return;
-      sessionModels.set(ai, selection.model);
-    }
-    await propose(
-      root,
+    if (!(await prepareAsk(ai))) return;
+    await makeProposal(
+      ai,
       {
-        ai,
         model: selectedModel(ai, ai === startingAI),
         request,
         scope: values.scope ?? '.',
         stages: (stages || 'guide').split(',').map((s) => s.trim()),
         resume: values.resume,
       },
-      question,
       tty || values.yes ? confirm : null,
     );
   };
@@ -490,14 +522,10 @@ async function main() {
               ...list.map((id) => choice(id, id)),
               choice('', '返回'),
             ]);
-            if (resume)
-              await propose(
-                root,
-                {
-                  resume,
-                  model: selectedModel(state.ai),
-                },
-                question,
+            if (resume && state.ai && (await prepareAsk(state.ai)))
+              await makeProposal(
+                state.ai,
+                { resume, model: selectedModel(state.ai) },
                 confirm,
               );
           }
@@ -588,6 +616,7 @@ async function main() {
           ]);
       }
     }
+    credentials.flush();
     if (tty) return dashboard();
     const state = snapshot(root);
     panel('项目检查', [
