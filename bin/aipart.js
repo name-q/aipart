@@ -36,7 +36,7 @@ import { check as lint } from '../lib/gate.js';
 
 import { databaseName, dataPrefix, localPrefix } from '../lib/storage.js';
 import { pruneLegacy } from '../lib/migrate.js';
-import { codexModels, connect, signIn } from '../lib/client.js';
+import { modelCatalog, connect, signIn } from '../lib/client.js';
 import { inspect } from '../lib/inspect.js';
 const toolNames = {
   codex: 'Codex',
@@ -120,17 +120,83 @@ async function main() {
   const sessionModels = new Map();
   const modelFile = (ai) => '@local/model-' + ai + '.txt';
   const selectedModel = (ai) =>
-    values.model ??
     sessionModels.get(ai) ??
+    values.model ??
     read(root, modelFile(ai)) ??
     undefined;
-  const review = async (ai, scope, request) => {
+  const login = async (ai, device = false) => {
+    if (ai === 'pi')
+      panel('Pi 登录', [
+        '在 Pi 输入 /login 并选择服务商，完成后退出 Pi 继续。',
+      ]);
+    try {
+      signIn(root, ai, device);
+    } catch (error) {
+      panel('登录未完成', [error.message]);
+    }
+  };
+  const chooseModel = async (ai, current, { initial = false } = {}) => {
+    for (;;) {
+      const models = await progress(
+        '读取 ' + toolNames[ai] + ' 的模型列表',
+        () => modelCatalog(root, ai),
+      );
+      if (!models.length)
+        panel('暂无模型列表', [
+          '请确认客户端已安装并登录，或输入已知的模型 ID。',
+        ]);
+      const selection = await menu(
+        '选择 ' + toolNames[ai] + ' 模型',
+        [
+          ...models.map((m) =>
+            choice(
+              'model=' + m.id,
+              ai === 'claude' ? m.id + ' · ' + m.label : m.label,
+              m.description ? m.id + ' · ' + m.description : m.id,
+            ),
+          ),
+          ...(!models.length
+            ? [
+                choice('login', '登录后刷新列表'),
+                choice('refresh', '重新读取模型'),
+              ]
+            : []),
+          choice('manual', '手动输入模型 ID'),
+          ...(initial
+            ? [
+                choice('offline', '仅用本地检查'),
+                choice('cancel', '取消初始化'),
+              ]
+            : [choice('back', '返回连接菜单')]),
+        ],
+        current ? 'model=' + current : undefined,
+      );
+      if (selection === 'refresh') continue;
+      if (selection === 'login') {
+        await login(ai);
+        continue;
+      }
+      if (selection === 'manual')
+        return { model: await question('输入模型 ID') };
+      return selection.startsWith('model=')
+        ? { model: selection.slice(6) }
+        : { action: selection };
+    }
+  };
+  const review = async (ai, scope, request, { initial = false } = {}) => {
     if (values.offline) return null;
     if (ai === 'cursor') {
       if (tty) panel('Cursor IDE', ['规则和草案可在 IDE 中继续']);
       return null;
     }
     let model = selectedModel(ai);
+    if (initial && tty && !values.model) {
+      const selection = await chooseModel(ai, model, { initial: true });
+      if (selection.action === 'offline') return null;
+      if (selection.action === 'cancel')
+        throw Object.assign(Error('已取消'), { name: 'ExitPromptError' });
+      model = selection.model;
+    }
     for (;;) {
       try {
         const result = await progress(
@@ -149,15 +215,18 @@ async function main() {
         if (!tty) throw error;
         panel('连接未完成', [error.message]);
         const action = await menu('接下来怎么做？', [
+          choice('model', '选择其他模型'),
           ...(ai === 'codex'
             ? [
-                choice('model', '选择账号可用的模型'),
                 choice('login', '在浏览器登录 ChatGPT', '登录完成后会重新连接'),
                 choice('device', '使用设备码登录', '适用于远程终端'),
               ]
-            : ai === 'pi'
-              ? [choice('login', '在 Pi 中登录或切换模型')]
-              : []),
+            : [
+                choice(
+                  'login',
+                  ai === 'pi' ? '在 Pi 中登录' : '登录 Claude Code',
+                ),
+              ]),
           choice('retry', '重试连接'),
           choice('offline', '仅用本地检查'),
           choice('cancel', '取消'),
@@ -166,32 +235,13 @@ async function main() {
         if (action === 'cancel')
           throw Object.assign(Error('已取消'), { name: 'ExitPromptError' });
         if (action === 'model') {
-          const models = await progress('读取 Codex 模型目录', () =>
-            codexModels(root),
-          );
-          const next = await menu(
-            '选择模型',
-            [
-              ...models.map((m) => choice(m.id, m.label, m.id)),
-              choice('manual', '手动输入模型 ID'),
-              choice('', '返回连接菜单'),
-            ],
-            model,
-          );
-          if (next)
-            model = next === 'manual' ? await question('输入模型 ID') : next;
+          const next = await chooseModel(ai, model);
+          if (next.model) model = next.model;
         }
         if (action === 'login' || action === 'device') {
-          if (ai === 'pi')
-            panel('Pi 登录', [
-              '在 Pi 输入 /login 并选择服务商。登录后可用 /model 选模型，退出 Pi 后继续。',
-            ]);
-          try {
-            signIn(root, ai, action === 'device');
-          } catch (error) {
-            panel('登录未完成', [error.message]);
-          }
-          model = undefined;
+          await login(ai, action === 'device');
+          const next = await chooseModel(ai, model);
+          if (next.model) model = next.model;
         }
       }
     }
@@ -336,14 +386,15 @@ async function main() {
     }
   };
   if (cmd === 'init') {
-    if (tty) heading('项目设置', '选择工具  →  检查项目  →  管理规则');
+    if (tty)
+      heading('项目设置', '选择工具  →  选择模型  →  检查项目  →  管理规则');
     const selected =
       read(root, manifest) === null ? undefined : snapshot(root).ai;
     const ai = values.ai ?? (await chooseAgent(selected));
     const migrating =
       read(root, manifest) === null && read(root, legacyManifest) !== null;
     const edits = init(root, ai, values.upgrade);
-    const scan = await review(ai, '.', '');
+    const scan = await review(ai, '.', '', { initial: true });
     if (scan?.model) edits.push(change(root, modelFile(ai), scan.model));
     if ((selected && selected !== ai) || migrating) {
       const personal = edits.find((e) => e.name === '@local/settings.json');
