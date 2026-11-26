@@ -22,6 +22,7 @@
   },
   "dependencies": {
     "@inquirer/prompts": "7.10.1",
-    "jose": "6.2.18"
+    "jose": "6.2.18",
+    "undici": "7.30.2"
   }
 }
