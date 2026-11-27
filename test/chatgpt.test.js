@@ -108,8 +108,14 @@ test('浏览器授权后读取账号模型目录，并流式执行用户选中�
       code: 'short-lived-code',
       client_id: clientId,
     });
-    void nativeFetch(redirect).then((response) => response.text());
+    pages.push(
+      nativeFetch(redirect).then(async (response) => ({
+        type: response.headers.get('content-type'),
+        body: await response.text(),
+      })),
+    );
   }
+  const pages = [];
   useChatGPT(await signInWithChatGPT({ open }));
   assert.equal(
     authorization.searchParams.get('client_id'),
@@ -133,5 +139,9 @@ test('浏览器授权后读取账号模型目录，并流式执行用户选中�
   );
   useChatGPT(await signInWithChatGPT({ open }));
   assert.equal(authorization.searchParams.get('client_id'), clientId);
+  const page = await pages[0];
+  assert.match(page.type, /^text\/html/);
+  assert.match(page.body, /登录成功/);
+  assert.match(page.body, /data:image\/png;base64,/);
   assert.equal(requests.filter((url) => url.endsWith('/v1/models')).length, 1);
 });
