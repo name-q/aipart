@@ -111,6 +111,22 @@ test('旧版规则库改名为 .aipart 后规则保持不变，冲突时停止',
   assert.throws(() => renameDatabase(root), /同时存在/);
 });
 
+test('自动清理旧版留下的空 .aipart 目录，目录里有文件时停止', async (t) => {
+  const root = fixture(t);
+  const { renameDatabase } = await import('../lib/storage.js');
+  fs.mkdirSync(path.join(root, '.aipart/local'), { recursive: true });
+  fs.mkdirSync(path.join(root, '.aipart/rules'));
+  assert.equal(renameDatabase(root), false);
+  assert.equal(fs.existsSync(path.join(root, '.aipart')), false);
+  apply(root, init(root, 'openai'));
+  assert.ok(fs.statSync(path.join(root, '.aipart')).isFile());
+  fs.rmSync(path.join(root, '.aipart'));
+  fs.mkdirSync(path.join(root, '.aipart/rules'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.aipart/rules/reuse.json'), '{}');
+  assert.throws(() => renameDatabase(root), /rules\/reuse\.json/);
+  assert.ok(fs.existsSync(path.join(root, '.aipart/rules/reuse.json')));
+});
+
 test('旧工具停用后可重新选择提供方，已有项目规则继续生效', async (t) => {
   const root = fixture(t);
   const { project, manifest } = await import('../lib/project.js');
